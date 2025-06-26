@@ -3,13 +3,12 @@ from vmas import render_interactively
 from vmas.simulator.core import World, Agent, Landmark, Sphere, Line
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.dynamics.holonomic import Holonomic
-from vmas.simulator.utils import Color
-from vmas.simulator.utils import Color, ScenarioUtils, TorchUtils, X
+from vmas.simulator.utils import Color, TorchUtils
 from vmas.simulator.controllers.velocity_controller import VelocityController
 
 class Scenario(BaseScenario):
     """
-    "飞身上篮"简化版2v2投篮强化学习环境
+    "飞身上篮"简化版2v2投篮强化学习环境 (已优化和修复版本)
     """
     def make_world(self, batch_dim: int, device: torch.device, **kwargs):
         # ----------------- 超参数设定 (Hyperparameters) -----------------
@@ -25,31 +24,34 @@ class Scenario(BaseScenario):
         self.dt = kwargs.get("dt", 0.1)
         # 智能体物理属性
         self.agent_radius = kwargs.get("agent_radius", 0.3)
-        self.a_max = kwargs.get("a_max", 3.0) # 最大加速度
-        self.v_max = kwargs.get("v_max", 5.0) # 最大速度
-        
+        self.a_max = kwargs.get("a_max", 3.0)  # 最大加速度
+        self.v_max = kwargs.get("v_max", 5.0)  # 最大速度
+
         # 终止条件阈值
-        self.v_shot_threshold = kwargs.get("v_shot_threshold", 0.1) # 投篮速度阈值
-        self.a_shot_threshold = kwargs.get("a_shot_threshold", 0.1) # 投篮加速度阈值
-        self.v_foul_threshold = kwargs.get("v_foul_threshold", 2.0) # 碰撞犯规速度阈值
+        self.v_shot_threshold = kwargs.get("v_shot_threshold", 0.2)  # 投篮速度阈值
+        self.a_shot_threshold = kwargs.get("a_shot_threshold", 0.1)  # 投篮加速度阈值
+        self.v_foul_threshold = kwargs.get("v_foul_threshold", 2.0)  # 碰撞犯规速度阈值
 
         # 奖励系数
-        self.max_score = kwargs.get("max_score", 100.0)
-        self.R_foul = kwargs.get("R_foul", 50.0)
+        self.max_score = kwargs.get("max_score", 120.0)
+        self.R_foul = kwargs.get("R_foul", 160.0)
         self.k_a1_approach = kwargs.get("k_a1_approach", 2.0)
         self.k_a1_in_spot_reward = kwargs.get("k_a1_in_spot_reward", 2.0)
         self.k_def_block = kwargs.get("k_def_block", 5.0)
         self.block_sigma = kwargs.get("block_sigma", 2.5)
-        self.k_coll_active = kwargs.get("k_coll_active", 2.0)
-        self.k_coll_passive = kwargs.get("k_coll_passive", 1.0)
-        self.oob_penalty = kwargs.get("oob_penalty", -5.0) # 出界惩罚值
-        self.def_proximity_threshold = kwargs.get("def_proximity_threshold", 1.0) # 防守奖励生效的最大距离
-        self.overextend_penalty = kwargs.get("overextend_penalty", -0.1) # 防守方越过半场的惩罚
-        self.k_def_spot_approach = kwargs.get("k_def_spot_approach", 0.5) # 防守方接近隐藏投篮点的奖励系数
-        self.k_a1_blocked_penalty = kwargs.get("k_a1_blocked_penalty", -2.0) # A1被封堵的惩罚系数
-        self.k_a2_screen = kwargs.get("k_a2_screen", 3.0) # A2执行掩护的奖励系数
-        self.k_a2_crowding_penalty = kwargs.get("k_a2_crowding_penalty", 0.01) # A2因过于靠近A1而受到的扎堆惩罚系数
+        self.k_coll_active = kwargs.get("k_coll_active", 5.0)
+        self.k_coll_passive = kwargs.get("k_coll_passive", 0.1)
+        self.oob_penalty = kwargs.get("oob_penalty", -10.0)  # 出界惩罚值
+        self.def_proximity_threshold = kwargs.get("def_proximity_threshold", 0.9)  # 防守奖励生效的最大距离
+        self.overextend_penalty = kwargs.get("overextend_penalty", -6.0)  # 防守方越过半场的惩罚
+        self.k_def_spot_approach = kwargs.get("k_def_spot_approach", 0.01)  # 防守方接近隐藏投篮点的奖励系数
+        self.k_a1_blocked_penalty = kwargs.get("k_a1_blocked_penalty", -1.0)  # A1被封堵的惩罚系数
+        self.k_velocity_penalty = kwargs.get("k_velocity_penalty", 0.5)
+        self.k_a2_screen = kwargs.get("k_a2_screen", 3.0)  # A2执行掩护的奖励系数
+        self.k_a2_crowding_penalty = kwargs.get("k_a2_crowding_penalty", 1.5)  # A2因过于靠近A1而受到的扎堆惩罚系数
         self.screen_sigma = kwargs.get("screen_sigma", 0.5)
+        self.gaussian_sigma = kwargs.get("gaussian_sigma", self.R_spot) # 高斯引导奖励的sigma
+        self.gaussian_scale = kwargs.get("gaussian_scale", self.k_a1_approach * 2.0) # 高斯引导奖励的缩放系数
 
         # ----------------- 环境构建 (World Setup) -----------------
         self.max_steps = int(self.t_limit / self.dt)
@@ -58,11 +60,9 @@ class Scenario(BaseScenario):
         self.n_defenders = 2
 
         world = World(batch_dim, device, dt=self.dt, substeps=4,
-                        x_semidim=self.W / 2, y_semidim=self.L / 2)
+                      x_semidim=self.W / 2, y_semidim=self.L / 2)
 
-        # 智能体
-        self.attackers = []
-        self.defenders = []
+        # 创建智能体
         for i in range(self.n_agents):
             is_attacker = i < self.n_attackers
             team_name = "attacker" if is_attacker else "defender"
@@ -72,54 +72,64 @@ class Scenario(BaseScenario):
                 collide=True,
                 movable=True,
                 rotatable=False,
-                u_range = self.v_max,
-                drag = 0.01,
+                u_range=self.v_max,
+                drag=0.01,
                 shape=Sphere(radius=self.agent_radius),
                 dynamics=Holonomic(),
                 render_action=True,
                 color=Color.RED if is_attacker and agent_id == 1 else Color.BLUE if not is_attacker else Color.PINK
             )
+            # 添加自定义属性以区分队伍
             agent.is_attacker = is_attacker
-            agent.controller = VelocityController(
-            agent, world, [6,0,0.01], "parallel"
-        )
-            world.add_agent(agent)
-            if is_attacker: self.attackers.append(agent)
-            else: self.defenders.append(agent)
+            agent.controller = VelocityController(agent, world, [6,0,0.01], "parallel")
 
-        # 地标
+            world.add_agent(agent)
+
+        # 将智能体列表分开存储，方便后续使用
+        self.attackers = world.agents[:self.n_attackers]
+        self.defenders = world.agents[self.n_attackers:]
+        self.a1 = self.attackers[0]
+        self.a2 = self.attackers[1]
+
+        # 创建地标
         self.basket = Landmark(name="basket", collide=False, shape=Sphere(radius=0.1), color=Color.ORANGE)
         self.spot_center = Landmark(name="spot_center", collide=False, shape=Sphere(radius=0.05), color=Color.GREEN)
         self.shooting_area_vis = Landmark(name="shooting_area_vis", collide=False, shape=Sphere(radius=self.R_spot), color=Color.LIGHT_GREEN)
-        center_line = Landmark(name="center_line",collide=False,shape=Line(length=self.W),color=Color.GRAY
-        )
+        center_line = Landmark(name="center_line", collide=False, shape=Line(length=self.W), color=Color.GRAY)
         world.add_landmark(center_line)
         world.add_landmark(self.basket)
         world.add_landmark(self.spot_center)
         world.add_landmark(self.shooting_area_vis)
 
-        # 内部状态
+        # 内部状态变量
         self.t_remaining = torch.zeros(batch_dim, 1, device=device)
         self.prev_dist_to_spot = torch.zeros(batch_dim, self.n_agents, device=device)
         self.terminal_rewards = torch.zeros(batch_dim, self.n_agents, device=device)
-        self.dones = None
+        self.dones = torch.zeros(batch_dim, device=device, dtype=torch.bool)
         self.p_vels = torch.zeros((batch_dim, self.n_agents, 2), device=device)
 
         return world
 
     def reset_world_at(self, env_index: int | None = None):
+        """
+        使用矢量化拒绝采样重置智能体位置，以避免初始重叠。
+        """
+        # 如果是部分重置，获取对应的批次范围
         if env_index is None:
-            batch_dim = self.world.batch_dim
             batch_range = slice(None)
+            batch_dim = self.world.batch_dim
         else:
-            batch_dim = 1
             batch_range = env_index
-
-        self.t_remaining[batch_range] = self.t_limit
+            batch_dim = 1 if isinstance(env_index, int) else len(env_index)
         
+        # 重置时间和奖励
+        self.t_remaining[batch_range] = self.t_limit
+        self.terminal_rewards[batch_range] = 0.0
+        self.p_vels[batch_range] = 0.0
+
+        # 设置篮筐和投篮点位置
         basket_pos = torch.zeros(batch_dim, 2, device=self.world.device)
         basket_pos[:, 1] = self.L / 2 - 0.6
-
         self.basket.set_pos(basket_pos, batch_index=env_index)
 
         spot_x = (torch.rand(batch_dim, 1, device=self.world.device) - 0.5) * self.W
@@ -130,352 +140,437 @@ class Scenario(BaseScenario):
 
         # --- 矢量化拒绝采样 ---
         min_dist = self.agent_radius * 2
-        
-        # 存储所有智能体的最终生成位置
         agent_positions = torch.zeros(batch_dim, self.n_agents, 2, device=self.world.device)
+        needs_resampling = torch.ones(batch_dim, device=self.world.device, dtype=torch.bool)
+
+        # 在一个循环中处理所有需要重采样的环境，直到没有环境存在碰撞
+        for _ in range(10): # 设置最大重试次数以避免死循环
+            if not torch.any(needs_resampling):
+                break
+
+            num_resample = needs_resampling.sum()
+
+            # 为需要重采样的环境生成新位置
+            # 进攻方位置
+            att_x = (torch.rand(num_resample, self.n_attackers, 1, device=self.world.device) - 0.5) * self.W
+            att_y = -self.L / 2 + torch.rand(num_resample, self.n_attackers, 1, device=self.world.device) * self.spawn_area_depth
+            # 防守方位置
+            def_x = (torch.rand(num_resample, self.n_defenders, 1, device=self.world.device) - 0.5) * self.W
+            def_y = self.L / 2 - torch.rand(num_resample, self.n_defenders, 1, device=self.world.device) * self.spawn_area_depth
+
+            # 合并成一个张量
+            new_pos = torch.cat([
+                torch.cat([att_x, att_y], dim=-1),
+                torch.cat([def_x, def_y], dim=-1)
+            ], dim=1)
+            
+            # 将新生成的位置更新到总位置张量中
+            agent_positions[needs_resampling] = new_pos
+
+            # 矢量化计算距离矩阵
+            pos_diff = agent_positions.unsqueeze(2) - agent_positions.unsqueeze(1)
+            dist_matrix = torch.linalg.norm(pos_diff, dim=-1)
+            
+            # 为了避免检查对角线（自己和自己的距离），填充一个大于min_dist的值
+            dist_matrix.diagonal(dim1=-2, dim2=-1).fill_(min_dist + 1)
+            
+            # 检查每个环境中是否存在任何小于最小距离的碰撞
+            collisions = torch.any(dist_matrix < min_dist, dim=(1, 2))
+            needs_resampling = collisions
         
-        # 1. 分层放置每个智能体
-        for i in range(self.n_agents):
-            agent = self.world.agents[i]
-            
-            # 生成当前智能体的候选位置
-            def sample_positions():
-                x_pos = (torch.rand(batch_dim, 1, device=self.world.device) - 0.5) * self.W
-                if agent.is_attacker:
-                    y_pos = -self.L / 2 + torch.rand(batch_dim, 1, device=self.world.device) * self.spawn_area_depth
-                else:
-                    y_pos = self.L / 2 - torch.rand(batch_dim, 1, device=self.world.device) * self.spawn_area_depth
-                return torch.cat([x_pos, y_pos], dim=1)
-
-            candidate_positions = sample_positions()
-            
-            # 2. 对于已放置的智能体，进行碰撞检测和重采样
-            if i > 0:
-                # 设置最大重试次数以避免死循环
-                for _ in range(10): 
-                    # (batch_dim, i, 2)
-                    previous_positions = agent_positions[:, :i, :]
-                    # (batch_dim, 1, 2)
-                    current_positions_exp = candidate_positions.unsqueeze(1)
-                    
-                    # 计算与所有已放置智能体的距离
-                    distances = torch.linalg.norm(current_positions_exp - previous_positions, dim=2)
-                    
-                    # 找到任何一个小于最小距离的碰撞
-                    collisions = torch.any(distances < min_dist, dim=1)
-                    
-                    # 如果没有碰撞了，就跳出重试循环
-                    if not torch.any(collisions):
-                        break
-                    
-                    # 3. 仅为发生碰撞的环境重新生成位置
-                    num_collisions = collisions.sum()
-                    if num_collisions > 0:
-                        new_samples = sample_positions()
-                        candidate_positions[collisions] = new_samples[collisions]
-
-            # 将合格的位置存入最终位置张量
-            agent_positions[:, i, :] = candidate_positions
-
-        # 4. 批量设置所有智能体的位置和速度
+        # 批量设置所有智能体的位置和速度
         for i, agent in enumerate(self.world.agents):
             agent.set_pos(agent_positions[:, i, :], batch_index=env_index)
             agent.set_vel(torch.zeros(batch_dim, 2, device=self.world.device), batch_index=env_index)
 
         # 批量重置所有智能体到投篮点的距离
-        for i, agent in enumerate(self.world.agents):
-            agent_pos = agent_positions[:, i, :]
-            dist = torch.linalg.norm(agent_pos - spot_pos, dim=1)
-            self.prev_dist_to_spot[batch_range, i] = dist
-        self.terminal_rewards.zero_()
-        # 重置时也要清零上一帧速度
-        self.p_vels[batch_range].zero_()
+        dists = torch.linalg.norm(agent_positions - spot_pos.unsqueeze(1), dim=-1)
+        self.prev_dist_to_spot[batch_range] = dists
 
     def process_action(self, agent: Agent):
-        # [MODIFIED] 1. 全向加速度限制
-        # 策略输出的 agent.action.u 被视为期望速度
-
-        # 首先，将期望速度限制在智能体的最大速度范围内
-        agent.action.u = TorchUtils.clamp_with_norm(agent.action.u, agent.u_range)
-
         # 忽略过小的动作输入 (死区)
         action_norm = torch.linalg.vector_norm(agent.action.u, dim=1)
-        agent.action.u[action_norm < 0.08] = 0.0
+        agent.action.u[action_norm < 0.1] = 0.0
 
-        # 计算在单个时间步内达到期望速度所需的加速度
+        # 将期望速度限制在最大速度范围内 (圆形限制)
+        agent.action.u = TorchUtils.clamp_with_norm(agent.action.u, agent.u_range)
+        
+        # 计算达到期望速度所需的加速度
         requested_a = (agent.action.u - agent.state.vel) / self.world.dt
 
-        # 将所需加速度限制在智能体的最大物理能力 a_max 内
-        # clamp_with_norm 确保了加速度限制在各个方向上是均匀的 (圆形限制)
+        # 将所需加速度限制在最大物理能力范围内 (圆形限制)
         achievable_a = TorchUtils.clamp_with_norm(requested_a, self.a_max)
 
         # 根据可行的加速度，计算出本帧智能体能达到的最终速度
-        # 这将作为速度控制器的目标
         agent.action.u = agent.state.vel + achievable_a * self.world.dt
-
-
         # 调用底层速度控制器以应用计算出的最终速度
         agent.controller.process_force()
 
+    def pre_step(self):
+        """
+        在每个物理步长开始前执行。
+        用于集中计算所有智能体间的交互信息，避免重复计算。
+        """
+        # 更新剩余时间
+        self.t_remaining -= self.world.dt
 
-    def check_done(self):
+        # --- 矢量化计算所有智能体间的交互信息 ---
+        # 1. 整合所有智能体的位置和速度到一个大张量中
+        self.all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1) # (B, N, 2)
+        self.all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1) # (B, N, 2)
         
-        # 检查所有 batch 是否有任一终止条件被触发
-        dones = torch.zeros(self.world.batch_dim, device=self.world.device, dtype=torch.bool)
+        # 2. 使用广播计算成对(pairwise)的相对位置和距离
+        #    (B, N, 1, 2) - (B, 1, N, 2) -> (B, N, N, 2)
+        pos_diffs = self.all_pos.unsqueeze(2) - self.all_pos.unsqueeze(1)
+        self.dist_matrix = torch.linalg.norm(pos_diffs, dim=-1) # (B, N, N)
 
-        a1 = self.attackers[0]
+        # 3. 计算碰撞矩阵
+        self.collision_matrix = self.dist_matrix < (self.agent_radius * 2)
+        # 忽略对角线（自己和自己）
+        self.collision_matrix.diagonal(dim1=-2, dim2=-1).fill_(False)
+
+        # 4. 计算成对相对速度
+        self.vel_diffs = self.all_vel.unsqueeze(2) - self.all_vel.unsqueeze(1) # (B, N, N, 2)
+        self.vel_diffs_norm = torch.linalg.norm(self.vel_diffs, dim=-1) # (B, N, N)
+
+        # 5. 检查并设置 done 标志
+        self.dones = self.check_done()
+
+    def post_step(self):
+        """
+        在物理步长结束后执行，用于记录状态以备下一帧使用。
+        """
+        # 记录当前帧的速度，作为下一帧的“上一帧速度”
+        self.p_vels.copy_(self.all_vel)
+
+        # 如果任何环境已结束，需要更新 prev_dist_to_spot 的最终值
+        if torch.any(self.dones):
+            dists = torch.linalg.norm(self.all_pos - self.spot_center.state.pos.unsqueeze(1), dim=-1)
+            self.prev_dist_to_spot[self.dones] = dists[self.dones]
+    
+    def check_done(self):
+        # 初始化一个全为False的done张量
+        dones = torch.zeros(self.world.batch_dim, device=self.world.device, dtype=torch.bool)
         
         # -- 条件1: 尝试投篮 (Shot Attempt) --
-        dist_to_spot = torch.linalg.norm(a1.state.pos - self.spot_center.state.pos, dim=1)
-        in_area = (dist_to_spot <= self.R_spot) & (a1.state.pos[:,1] > 0)
-        stopped = torch.linalg.norm(a1.state.vel, dim=1) < self.v_shot_threshold
-        if a1.action.u is not None:
-            not_accelerating = torch.linalg.norm(a1.action.u, dim=1) < self.a_shot_threshold
-        else:
-            not_accelerating = torch.tensor([False] * self.world.batch_dim, device=self.world.device)
-        shot_attempted = in_area & stopped & not_accelerating & ~dones
+        dist_to_spot = torch.linalg.norm(self.a1.state.pos - self.spot_center.state.pos, dim=1)
+        in_area = (dist_to_spot <= self.R_spot) & (self.a1.state.pos[:, 1] > 0)
+        stopped = torch.linalg.norm(self.a1.state.vel, dim=1) < self.v_shot_threshold
+        not_accelerating = torch.linalg.norm(self.a1.action.u, dim=1) < self.a_shot_threshold
         
+        # 仅在未结束的环境中检查此条件
+        shot_attempted = in_area & stopped & not_accelerating & ~dones
         if torch.any(shot_attempted):
+            # 1. 计算基础分
             final_score = self.max_score * (1 - dist_to_spot[shot_attempted] / self.R_spot)
-            self.terminal_rewards[shot_attempted, :self.n_attackers] = final_score.unsqueeze(-1)
-            self.terminal_rewards[shot_attempted, self.n_attackers:] = -final_score.unsqueeze(-1)
+
+            # 2. 【新增】计算视野遮挡系数
+            shot_b_idx = shot_attempted.nonzero(as_tuple=True)[0]
+            a1_pos = self.a1.state.pos[shot_b_idx]
+            basket_pos = self.basket.state.pos[shot_b_idx]
+            
+            # 获取所有其他智能体（A2, D1, D2）的位置
+            other_agent_indices = [i for i in range(self.n_agents) if i != 0]
+            blocker_pos = self.all_pos[shot_b_idx][:, other_agent_indices, :]
+            
+            # 从A1到篮筐的向量
+            shot_vector = basket_pos - a1_pos
+            shot_vector_norm_sq = torch.sum(shot_vector**2, dim=-1, keepdim=True) + 1e-6
+            
+            # 从A1到潜在遮挡者的向量
+            blocker_vector = blocker_pos - a1_pos.unsqueeze(1)
+            
+            # ############# 代码修复处 #############
+            # 将遮挡者向量投影到投篮向量上，判断其相对位置
+            # 使用显式广播和求和代替einsum，避免维度匹配错误
+            # blocker_vector: (n_shots, 3, 2), shot_vector.unsqueeze(1): (n_shots, 1, 2)
+            # dot_product 结果: (n_shots, 3)
+            dot_product = torch.sum(blocker_vector * shot_vector.unsqueeze(1), dim=-1)
+            # shot_vector_norm_sq 形状为 (n_shots, 1)，可直接用于广播除法
+            proj_len_ratio = dot_product / shot_vector_norm_sq
+            # ######################################
+            
+            # 条件A: 遮挡者必须在A1和篮筐之间
+            is_between = (proj_len_ratio > 0) & (proj_len_ratio < 1)
+            
+            # 计算遮挡者到投篮路线的垂直距离
+            projection = proj_len_ratio.unsqueeze(-1) * shot_vector.unsqueeze(1)
+            dist_perp_sq = torch.sum((blocker_vector - projection)**2, dim=-1)
+            
+            # 条件B: 遮挡者的身体必须与投篮路线相交
+            block_sigma = self.agent_radius  # 使用智能体半径作为遮挡判定的标准差
+            intersects_line = dist_perp_sq < block_sigma**2
+            
+            # 条件C: 遮挡者必须离A1足够近，形成有效干扰
+            dist_to_a1_sq = torch.sum(blocker_vector**2, dim=-1)
+            is_close = dist_to_a1_sq < (3 * self.agent_radius)**2 # 定义“近”为3倍半径范围内
+            
+            # 结合所有条件
+            is_blocker = is_between & intersects_line & is_close
+            
+            # 基于垂直距离计算每个有效遮挡者的贡献值
+            block_contribution = torch.exp(-dist_perp_sq / (2 * block_sigma**2))
+            
+            # 将所有有效遮挡者的贡献值相加，得到总遮挡系数
+            total_block_factor = (block_contribution * is_blocker.float()).sum(dim=1)
+            
+            # 将系数限制在[0, 1]范围内
+            total_block_factor = torch.clamp(total_block_factor, 0, 1)
+
+            # 3. 根据遮挡系数修正最终得分
+            final_score_modified = final_score * (1 - total_block_factor)
+            
+            # 4. 分配修正后的奖励
+            self.terminal_rewards[shot_b_idx, :self.n_attackers] = final_score_modified.unsqueeze(-1)
+            self.terminal_rewards[shot_b_idx, self.n_attackers:] = -final_score_modified.unsqueeze(-1)
+            
             dones |= shot_attempted
 
         # -- 条件2: 时间耗尽 (Time Up) --
         time_up = (self.t_remaining.squeeze(-1) <= 0) & ~dones
         if torch.any(time_up):
-            # 进攻方失败，受到惩罚
             self.terminal_rewards[time_up, :self.n_attackers] = -self.max_score
-            # 防守方成功，获得奖励
             self.terminal_rewards[time_up, self.n_attackers:] = self.max_score
             dones |= time_up
 
-        # --- 碰撞犯规检查 ---
-        for i, agent_i in enumerate(self.world.agents):
-            for j, agent_j in enumerate(self.world.agents):
-                if i >= j: continue
-                are_colliding = self.world.is_overlapping(agent_i, agent_j)
-                are_colliding &= ~dones
-                if torch.any(are_colliding):
-                    v_rel = torch.linalg.norm(agent_i.state.vel - agent_j.state.vel, dim=1)
-                    is_foul = v_rel > self.v_foul_threshold
-                    foul_collision = are_colliding & is_foul
-                    if torch.any(foul_collision):
-                        # --- 判断主动方 (使用上一帧的速度) ---
-                        pos_rel = agent_j.state.pos - agent_i.state.pos
-                        # 从我们自己维护的张量中获取碰撞前的速度
-                        agent_i_p_vel = self.p_vels[:, i]
-                        vel_rel_on_pos = torch.einsum("bd,bd->b", agent_i_p_vel, pos_rel)
-                        i_is_active = vel_rel_on_pos > 0
-                        
-                        i_fouled_mask = i_is_active & foul_collision
-                        j_fouled_mask = ~i_is_active & foul_collision
+        # -- 条件3: 碰撞犯规 (Foul) --
+        # 犯规条件: 正在碰撞 & 相对速度超过阈值 & 环境尚未结束
+        is_foul = self.collision_matrix & (self.vel_diffs_norm > self.v_foul_threshold) & ~dones.view(-1, 1, 1)
 
-                        is_friendly_fire = agent_i.is_attacker == agent_j.is_attacker
-                        if is_friendly_fire:
-                            if agent_i.is_attacker:
-                                self.terminal_rewards[foul_collision, :self.n_attackers] = -self.R_foul
-                            else:
-                                self.terminal_rewards[foul_collision, self.n_attackers:] = -self.R_foul
-                        else:
-                            if agent_i.is_attacker:
-                                self.terminal_rewards[i_fouled_mask, :self.n_attackers] = -self.R_foul
-                                self.terminal_rewards[i_fouled_mask, self.n_attackers:] = self.R_foul
-                                self.terminal_rewards[j_fouled_mask, self.n_attackers:] = -self.R_foul
-                                self.terminal_rewards[j_fouled_mask, :self.n_attackers] = self.R_foul
-                            else:
-                                self.terminal_rewards[i_fouled_mask, self.n_attackers:] = -self.R_foul
-                                self.terminal_rewards[i_fouled_mask, :self.n_attackers] = self.R_foul
-                                self.terminal_rewards[j_fouled_mask, :self.n_attackers] = -self.R_foul
-                                self.terminal_rewards[j_fouled_mask, self.n_attackers:] = self.R_foul
+        # 获取所有犯规碰撞的索引 (只考虑上三角矩阵避免重复计算)
+        foul_indices = torch.triu(is_foul, diagonal=1).nonzero(as_tuple=True)
+        if foul_indices[0].numel() > 0:
+            b_idx, i_idx, j_idx = foul_indices
 
-                        dones |= foul_collision
+            # 确定每次犯规中的主动方
+            agent_i_p_vel = self.p_vels[b_idx, i_idx]
+            pos_rel = self.all_pos[b_idx, j_idx] - self.all_pos[b_idx, i_idx]
+            vel_rel_on_pos = torch.einsum("bd,bd->b", agent_i_p_vel, pos_rel)
+            i_is_active = vel_rel_on_pos > 0
 
-        if torch.any(dones):
-                for i in range(self.n_agents):
-                    agent_pos = self.world.agents[i].state.pos
-                    dist = torch.linalg.norm(agent_pos - self.spot_center.state.pos, dim=1)
-                    self.prev_dist_to_spot[:, i][dones] = dist[dones]
+            # 确定犯规中每个智能体的队伍
+            i_is_attacker = i_idx < self.n_attackers
+            j_is_attacker = j_idx < self.n_attackers
+
+            # 确定主动方和被动方的队伍
+            active_fouler_is_attacker = torch.where(i_is_active, i_is_attacker, j_is_attacker)
+            passive_agent_is_attacker = torch.where(i_is_active, j_is_attacker, i_is_attacker)
+            
+            # 判断是否是友军犯规
+            is_friendly_fire = (active_fouler_is_attacker == passive_agent_is_attacker)
+            
+            # --- 情况1: 对手犯规 ---
+            opponent_foul_mask = ~is_friendly_fire
+            if torch.any(opponent_foul_mask):
+                # 筛选出对手犯规的相关信息
+                opp_b = b_idx[opponent_foul_mask]
+                opp_active_is_attacker = active_fouler_is_attacker[opponent_foul_mask]
+
+                # 子情况1a: 进攻方是主动犯规方 (惩罚进攻队, 奖励防守队)
+                attacker_foul_mask = opp_active_is_attacker
+                b_att_foul = opp_b[attacker_foul_mask]
+                if b_att_foul.numel() > 0:
+                    self.terminal_rewards[b_att_foul, :self.n_attackers] = -self.R_foul
+                    self.terminal_rewards[b_att_foul, self.n_attackers:] = self.R_foul
+
+                # 子情况1b: 防守方是主动犯规方 (惩罚防守队, 奖励进攻队)
+                defender_foul_mask = ~opp_active_is_attacker
+                b_def_foul = opp_b[defender_foul_mask]
+                if b_def_foul.numel() > 0:
+                    self.terminal_rewards[b_def_foul, self.n_attackers:] = -self.R_foul
+                    self.terminal_rewards[b_def_foul, :self.n_attackers] = self.R_foul
+            
+            # --- 情况2: 友军犯规 ---
+            friendly_foul_mask = is_friendly_fire
+            if torch.any(friendly_foul_mask):
+                # 筛选出友军犯规的相关信息
+                ff_b = b_idx[friendly_foul_mask]
+                ff_active_is_attacker = active_fouler_is_attacker[friendly_foul_mask]
+
+                # 子情况2a: 进攻队内部犯规 (惩罚进攻队)
+                ff_attacker_mask = ff_active_is_attacker
+                b_ff_att_foul = ff_b[ff_attacker_mask]
+                if b_ff_att_foul.numel() > 0:
+                    self.terminal_rewards[b_ff_att_foul, :self.n_attackers] = -self.R_foul
+                
+                # 子情况2b: 防守队内部犯规 (惩罚防守队)
+                ff_defender_mask = ~ff_active_is_attacker
+                b_ff_def_foul = ff_b[ff_defender_mask]
+                if b_ff_def_foul.numel() > 0:
+                    self.terminal_rewards[b_ff_def_foul, self.n_attackers:] = -self.R_foul
+
+            # 在所有发生犯规的环境中设置done为True
+            dones[b_idx] = True
+
         return dones
     
     def done(self):
-        return self.dones if self.dones is not None else torch.zeros(self.world.batch_dim, device=self.world.device, dtype=torch.bool)
+        return self.dones
 
     def reward(self, agent: Agent):
-        is_first_agent = agent == self.world.agents[0]
-        if is_first_agent:
-            self.t_remaining -= self.world.dt
-            self.dones = self.check_done()
-            all_current_vels = torch.stack([a.state.vel for a in self.world.agents], dim=1)
-            self.p_vels.copy_(all_current_vels)
         agent_idx = self.world.agents.index(agent)
-
-        # 稠密奖励
         dense_reward = torch.zeros(self.world.batch_dim, device=self.world.device)
 
+        # --- 通用奖励/惩罚 ---
         # 出界惩罚
         pos = agent.state.pos
-        is_oob_x = torch.abs(pos[:, 0]) > (0.99 * self.W / 2)
-        is_oob_y = torch.abs(pos[:, 1]) > (0.99 * self.L / 2)
-        is_oob = is_oob_x | is_oob_y
+        is_oob = (torch.abs(pos[:, 0]) > (0.99 * self.W / 2)) | \
+                 (torch.abs(pos[:, 1]) > (0.99 * self.L / 2))
         dense_reward[is_oob] += self.oob_penalty
 
-        a1 = self.attackers[0]
-        a2 = self.attackers[1]
-        
-        if agent == a1:
-            # 接近投篮点奖励
-            current_dist = torch.linalg.norm(pos - self.spot_center.state.pos, dim=1)
-            dense_reward += (self.prev_dist_to_spot[:, agent_idx] - current_dist) * self.k_a1_approach
-            self.prev_dist_to_spot[:, agent_idx] = current_dist
+        # 碰撞惩罚 (使用 pre_step 中计算好的矩阵)
+        agent_collisions = self.collision_matrix[:, agent_idx, :]
+        if torch.any(agent_collisions):
+            # 判断主动/被动碰撞
+            pos_rel = self.all_pos - pos.unsqueeze(1) # (B, N, 2)
+            vel_proj = torch.einsum("bd,bnd->bn", agent.state.vel, pos_rel)
+            is_active = vel_proj > 0
 
-            if self.k_a1_in_spot_reward > 0:
-                is_in_spot = (current_dist <= self.R_spot) & (agent.state.pos[:,1] > 0)
-                reward_magnitude = (1 - current_dist / self.R_spot)
-                spot_reward = self.k_a1_in_spot_reward * reward_magnitude * is_in_spot.float()
-                dense_reward += spot_reward
+            # 计算惩罚值
+            active_penalty = -self.k_coll_active * self.vel_diffs_norm[:, agent_idx, :]
+            passive_penalty = -self.k_coll_passive * self.vel_diffs_norm[:, agent_idx, :]
             
-            # 被封堵惩罚
-            total_block_factor = torch.zeros_like(dense_reward)
-            for defender in self.defenders:
-                p_d = defender.state.pos
-                ap = self.basket.state.pos - pos
-                ad = p_d - pos
-                proj_len = torch.einsum("bd,bd->b", ad, ap) / (torch.linalg.norm(ap, dim=1).pow(2) + 1e-6)
-                proj_len = torch.clamp(proj_len, 0, 1)
-                closest_point_on_line = pos + proj_len.unsqueeze(-1) * ap
-                dist_perp = torch.linalg.norm(p_d - closest_point_on_line, dim=1)
-                # 只考虑近距离的封堵
-                dist_to_def = torch.linalg.norm(pos - p_d, dim=1)
-                close_enough_mask = dist_to_def < self.def_proximity_threshold
-                block_factor = torch.exp(-dist_perp.pow(2) / (2 * self.block_sigma ** 2))
-                total_block_factor += block_factor * close_enough_mask
+            # 根据主动/被动选择惩罚
+            penalty = torch.where(is_active, active_penalty, passive_penalty)
+            
+            # 只在碰撞时施加惩罚
+            total_collision_penalty = (penalty * agent_collisions.float()).sum(dim=1)
+            dense_reward += total_collision_penalty
+
+        # --- 分角色奖励/惩罚 ---
+        if agent == self.a1:
+            # A1 (持球进攻者)
+            current_dist = torch.linalg.norm(pos - self.spot_center.state.pos, dim=1) # (B,)
+            
+            # 使用高斯函数引导A1到达目标点
+            gaussian_reward = self.gaussian_scale * torch.exp(- (current_dist**2) / (2 * self.gaussian_sigma**2))
+            dense_reward += gaussian_reward
+
+
+            # 2. 在投篮区域内的奖励 (保持不变)
+            is_in_spot = (current_dist <= self.R_spot) & (pos[:, 1] > 0)
+            spot_reward = self.k_a1_in_spot_reward * (1 - current_dist / self.R_spot) * is_in_spot.float()
+            dense_reward += spot_reward
+            
+            # 3. 【新增】在投篮区内时，惩罚高速移动，鼓励刹车
+            velocity_norm = torch.linalg.norm(agent.state.vel, dim=1)
+            velocity_penalty = -self.k_velocity_penalty * velocity_norm * is_in_spot.float()
+            dense_reward += velocity_penalty
+            # ######################################
+            
+            # 4. 被封堵惩罚 (保持不变)
+            def_pos = torch.stack([d.state.pos for d in self.defenders], dim=1) # (B, D, 2)
+            ap = self.basket.state.pos.unsqueeze(1) - pos.unsqueeze(1)  # (B, 1, 2)
+            ad = def_pos - pos.unsqueeze(1) # (B, D, 2)
+            
+            proj_len = torch.einsum("bnd,bmd->bnm", ad, ap).squeeze(-1) / (torch.linalg.norm(ap, dim=-1).pow(2) + 1e-6) # (B, D)
+            proj_len = torch.clamp(proj_len, 0, 1)
+            closest_point_on_line = pos.unsqueeze(1) + proj_len.unsqueeze(-1) * ap
+            dist_perp = torch.linalg.norm(def_pos - closest_point_on_line, dim=-1) # (B, D)
+            
+            dist_to_def = torch.linalg.norm(pos.unsqueeze(1) - def_pos, dim=-1) # (B, D)
+            close_enough_mask = dist_to_def < self.def_proximity_threshold
+            block_factor = torch.exp(-dist_perp.pow(2) / (2 * self.block_sigma ** 2))
+            total_block_factor = (block_factor * close_enough_mask.float()).sum(dim=1) # (B,)
             dense_reward += total_block_factor * self.k_a1_blocked_penalty
 
-        elif agent == a2:
-            # --- A2 (掩护) 奖励 ---
-            total_screen_reward = torch.zeros_like(dense_reward)
-            p_a1 = a1.state.pos
+        elif agent == self.a2:
+            # A2 (无球/掩护者)
+            p_a1 = self.a1.state.pos
             p_a2 = pos
-
-            for defender in self.defenders:
-                p_d = defender.state.pos
-                da1 = p_a1 - p_d
-                da2 = p_a2 - p_d
-                da1_norm_sq = torch.sum(da1**2, dim=1) + 1e-6
-                proj_len_ratio = torch.einsum("bd,bd->b", da2, da1) / da1_norm_sq
-                is_between = (proj_len_ratio > 0.05) & (proj_len_ratio < 0.95)
-                dist_perp_sq = torch.sum((da2 - proj_len_ratio.unsqueeze(-1) * da1)**2, dim=1)
-                screen_factor = torch.exp(-dist_perp_sq / (2 * self.screen_sigma ** 2))
-                dist_a2_d_sq = torch.sum((p_a2 - p_d)**2, dim=1)
-                dist_a2_a1_sq = torch.sum((p_a2 - p_a1)**2, dim=1)
-                is_closer_to_defender = dist_a2_d_sq < dist_a2_a1_sq
-                good_screen_mask = is_between & is_closer_to_defender
-                total_screen_reward += screen_factor * good_screen_mask.float()
             
+            # 1. 掩护奖励 (矢量化计算)
+            def_pos = torch.stack([d.state.pos for d in self.defenders], dim=1) # (B, D, 2)
+            da1 = p_a1.unsqueeze(1) - def_pos # (B, D, 2)
+            da2 = p_a2.unsqueeze(1) - def_pos # (B, D, 2)
+
+            da1_norm_sq = torch.sum(da1**2, dim=-1) + 1e-6 # (B, D)
+            proj_len_ratio = torch.einsum("bnd,bnd->bn", da2, da1) / da1_norm_sq # (B, D)
+            is_between = (proj_len_ratio > 0.05) & (proj_len_ratio < 0.95)
+            
+            dist_perp_sq = torch.sum((da2 - proj_len_ratio.unsqueeze(-1) * da1)**2, dim=-1) # (B, D)
+            screen_factor = torch.exp(-dist_perp_sq / (2 * self.screen_sigma ** 2))
+            
+            dist_a2_d_sq = torch.sum((p_a2.unsqueeze(1) - def_pos)**2, dim=-1)
+            dist_a2_a1_sq = torch.sum((p_a2 - p_a1)**2, dim=-1).unsqueeze(-1)
+            is_closer_to_defender = dist_a2_d_sq < dist_a2_a1_sq
+            
+            good_screen_mask = is_between & is_closer_to_defender
+            total_screen_reward = (screen_factor * good_screen_mask.float()).sum(dim=1) # (B,)
             dense_reward += total_screen_reward * self.k_a2_screen
 
-            # --- A2 (扎堆) 惩罚 ---
+            # 2. 扎堆惩罚
             dist_a2_a1 = torch.linalg.norm(p_a2 - p_a1, dim=1)
             crowding_penalty_factor = torch.exp(-dist_a2_a1.pow(2) / (2 * self.screen_sigma ** 2))
             dense_reward -= self.k_a2_crowding_penalty * crowding_penalty_factor
 
-        elif not agent.is_attacker:
-            p_basket = self.basket.state.pos
+        else: # 防守方
             p_d = pos
             in_defensive_half = p_d[:, 1] > 0
-            overextend_penalty_tensor = torch.where(in_defensive_half, torch.zeros_like(dense_reward), torch.full_like(dense_reward, self.overextend_penalty))
-            dense_reward += overextend_penalty_tensor
+            
+            # 1. 越过半场惩罚
+            dense_reward += torch.where(in_defensive_half, 0.0, self.overextend_penalty)
+            
+            # 2. 接近投篮点奖励
+            current_dist_to_spot = torch.linalg.norm(p_d - self.spot_center.state.pos, dim=1)
+            spot_approach_reward = (self.prev_dist_to_spot[:, agent_idx] - current_dist_to_spot) * self.k_def_spot_approach
+            dense_reward += spot_approach_reward * in_defensive_half.float()
+            self.prev_dist_to_spot[:, agent_idx] = current_dist_to_spot
 
-            if torch.any(in_defensive_half):
-                current_dist_to_spot = torch.linalg.norm(p_d - self.spot_center.state.pos, dim=1)
-                spot_approach_reward = (self.prev_dist_to_spot[:, agent_idx] - current_dist_to_spot) * self.k_def_spot_approach
-                self.prev_dist_to_spot[:, agent_idx] = current_dist_to_spot
-                dense_reward += spot_approach_reward
+            # 3. 封堵奖励
+            p_a1 = self.a1.state.pos
+            dist_to_a1 = torch.linalg.norm(p_d - p_a1, dim=1)
+            proximity_factor = torch.clamp(1.0 - (dist_to_a1 / self.def_proximity_threshold), min=0.0)
 
-                p_a1 = a1.state.pos
-                dist_to_a1 = torch.linalg.norm(p_d - p_a1, dim=1)
-                proximity_factor = torch.clamp(1.0 - (dist_to_a1 / self.def_proximity_threshold), min=0.0)
-                ap = p_basket - p_a1
-                ad = p_d - p_a1
-                proj_len = torch.einsum("bd,bd->b", ad, ap) / (torch.linalg.norm(ap, dim=1).pow(2) + 1e-6)
-                proj_len = torch.clamp(proj_len, 0, 1)
-                closest_point_on_line = p_a1 + proj_len.unsqueeze(-1) * ap
-                dist_perp = torch.linalg.norm(p_d - closest_point_on_line, dim=1)
-                block_factor = torch.exp(-dist_perp.pow(2) / (2 * self.block_sigma ** 2))
-                block_reward = self.k_def_block * block_factor * proximity_factor
-                dense_reward += torch.where(in_defensive_half, block_reward, torch.zeros_like(block_reward))
-
-        # [MODIFIED] 碰撞惩罚
-        for other in self.world.agents:
-            if agent == other: continue
-            
-            # self.world.collides 应返回一个形状为 (batch_dim,) 的布尔张量
-            is_colliding = self.world.is_overlapping(agent, other)
-            
-            # 为避免if语句带来的问题，我们直接进行张量运算。
-            # 先计算出所有环境下可能发生的惩罚值。
-            pos_rel = other.state.pos - agent.state.pos
-            v_rel = agent.state.vel - other.state.vel
-            v_rel_norm = torch.linalg.norm(v_rel, dim=1)
-            
-            vel_proj = torch.einsum("bd,bd->b", agent.state.vel, pos_rel)
-            is_active = vel_proj > 0
-
-            active_penalty = -self.k_coll_active * v_rel_norm
-            passive_penalty = -self.k_coll_passive * v_rel_norm
-            
-            penalty = torch.where(is_active, active_penalty, passive_penalty)
-            
-            # 使用 is_colliding 张量作为掩码(mask)来施加惩罚。
-            # .float() 将布尔张量 (True/False) 转换为 (1.0/0.0)。
-            # 在没有碰撞的环境中，惩罚为 penalty * 0.0 = 0。
-            dense_reward += penalty * is_colliding.float()
+            ap = self.basket.state.pos - p_a1
+            ad = p_d - p_a1
+            proj_len = torch.einsum("bd,bd->b", ad, ap) / (torch.linalg.norm(ap, dim=1).pow(2) + 1e-6)
+            proj_len = torch.clamp(proj_len, 0, 1)
+            closest_point_on_line = p_a1 + proj_len.unsqueeze(-1) * ap
+            dist_perp = torch.linalg.norm(p_d - closest_point_on_line, dim=1)
+            block_factor = torch.exp(-dist_perp.pow(2) / (2 * self.block_sigma ** 2))
+            block_reward = self.k_def_block * block_factor * proximity_factor
+            dense_reward += torch.where(in_defensive_half, block_reward, torch.zeros_like(block_reward))
         
-        rew = dense_reward + self.terminal_rewards[:, agent_idx]
-        return rew
+        # 返回稠密奖励和回合结束时的稀疏奖励之和
+        return dense_reward + self.terminal_rewards[:, agent_idx]
 
     def observation(self, agent: Agent):
+        # 确定智能体索引和队伍信息
         agent_idx = self.world.agents.index(agent)
-        
-        # 1-4: 自身和队友信息
-        if agent.is_attacker:
+        is_attacker = agent_idx < self.n_attackers
+
+        if is_attacker:
             teammate = self.attackers[1 - agent_idx]
-        else:
-            teammate_local_idx = agent_idx - self.n_attackers
-            teammate = self.defenders[1 - teammate_local_idx]
-
-        # 5-8: 对手信息
-        if agent.is_attacker:
             opp1, opp2 = self.defenders[0], self.defenders[1]
-        else: # is defender
-            opp1, opp2 = self.attackers[0], self.attackers[1] # A1, A2
-
-        # 9: 关键目标信息
-        if agent.is_attacker:
+            # 进攻方关注投篮点
             key_info_rel = self.spot_center.state.pos - agent.state.pos
-        else: # is defender
-            a1 = self.attackers[0]
-            key_info_rel = self.basket.state.pos - a1.state.pos
-            
+        else:
+            teammate = self.defenders[1 - (agent_idx - self.n_attackers)]
+            opp1, opp2 = self.attackers[0], self.attackers[1]
+            # 防守方关注A1到篮筐的路径
+            key_info_rel = self.basket.state.pos - self.a1.state.pos
+
+        # 将所有信息拼接成一个观测向量
         obs = torch.cat([
-            agent.state.pos,
-            agent.state.vel,
-            teammate.state.pos - agent.state.pos,
-            teammate.state.vel - agent.state.vel,
-            opp1.state.pos - agent.state.pos,
-            opp1.state.vel - agent.state.vel,
-            opp2.state.pos - agent.state.pos,
-            opp2.state.vel - agent.state.vel,
-            key_info_rel,
-            self.t_remaining / self.t_limit,
+            agent.state.pos,                              # 自身位置
+            agent.state.vel,                              # 自身速度
+            teammate.state.pos - agent.state.pos,         # 队友相对位置
+            teammate.state.vel - agent.state.vel,         # 队友相对速度
+            opp1.state.pos - agent.state.pos,             # 对手1相对位置
+            opp1.state.vel - agent.state.vel,             # 对手1相对速度
+            opp2.state.pos - agent.state.pos,             # 对手2相对位置
+            opp2.state.vel - agent.state.vel,             # 对手2相对速度
+            key_info_rel,                                 # 关键目标信息
+            self.t_remaining / self.t_limit,              # 归一化的剩余时间
         ], dim=-1)
 
         return obs
 
 
 if __name__ == "__main__":
+    # 使用此脚本可以交互式地运行和测试环境
     render_interactively(
         __file__,
-        control_two_agents=True,
+        control_two_agents=True, # 允许手动控制两个智能体进行测试
     )
