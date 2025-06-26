@@ -29,7 +29,7 @@ class Scenario(BaseScenario):
 
         # 终止条件阈值
         self.v_shot_threshold = kwargs.get("v_shot_threshold", 0.2)  # 投篮速度阈值
-        self.a_shot_threshold = kwargs.get("a_shot_threshold", 3.0)  # 投篮加速度阈值
+        self.a_shot_threshold = kwargs.get("a_shot_threshold", 1.0)  # 投篮加速度阈值
         self.v_foul_threshold = kwargs.get("v_foul_threshold", 2.0)  # 碰撞犯规速度阈值
 
         # 奖励系数
@@ -48,8 +48,8 @@ class Scenario(BaseScenario):
         self.k_a1_blocked_penalty = kwargs.get("k_a1_blocked_penalty", -1.0)  # A1被封堵的惩罚系数
         self.k_velocity_penalty = kwargs.get("k_velocity_penalty", 0.2)
         self.k_a2_screen = kwargs.get("k_a2_screen", 3.0)  # A2执行掩护的奖励系数
-        self.k_a2_crowding_penalty = kwargs.get("k_a2_crowding_penalty", 1.5)  # A2因过于靠近A1而受到的扎堆惩罚系数
-        self.screen_sigma = kwargs.get("screen_sigma", 0.5)
+        self.k_a2_crowding_penalty = kwargs.get("k_a2_crowding_penalty", 8)  # A2因过于靠近A1而受到的扎堆惩罚系数
+        self.screen_sigma = kwargs.get("screen_sigma", 0.9)
         self.gaussian_sigma = kwargs.get("gaussian_sigma", self.R_spot * 0.8) # 高斯引导奖励的sigma
         self.gaussian_scale = kwargs.get("gaussian_scale", self.k_a1_approach * 5.0) # 高斯引导奖励的缩放系数
         self.low_velocity_threshold = kwargs.get("low_velocity_threshold", 1.0) # 低速推挤判定阈值
@@ -58,7 +58,13 @@ class Scenario(BaseScenario):
         self.k_u_penalty_a1_in_spot = kwargs.get("k_u_penalty_a1_in_spot", 0.005) # A1在投篮点的额外控制量惩罚
         self.proximity_threshold = kwargs.get("proximity_threshold", self.agent_radius * 2.2) # 近距离惩罚阈值 (直径的1.1倍)
         self.proximity_penalty_margin = kwargs.get("proximity_penalty_margin", 0.15)      # 近距离惩罚曲线的软度
-        self.k_proximity_penalty = kwargs.get("k_proximity_penalty", 2.5)      # 近距离惩罚系数
+        self.k_proximity_penalty = kwargs.get("k_proximity_penalty", 5)      # 近距离惩罚系数
+        self.k_overextend_penalty = kwargs.get("k_overextend_penalty", 10.0)     # 增强的越界惩罚系数
+        self.k_pressure = kwargs.get("k_pressure", 0.5)                   # 压迫驱离奖励系数
+        self.k_positioning = kwargs.get("k_positioning", 0.2)                # 有效站位奖励系数
+        self.k_contest = kwargs.get("k_contest", 20.0)                     # 关键干扰奖励系数
+        self.k_a1_restriction = kwargs.get("k_a1_restriction", 0.5)         # 限制A1移动空间奖励系数
+        self.k_spot_control = kwargs.get("k_spot_control", 1.0)             # 投篮区域控制奖励系数
 
 
         # ----------------- 环境构建 (World Setup) -----------------
@@ -116,6 +122,8 @@ class Scenario(BaseScenario):
         self.dones = torch.zeros(batch_dim, device=device, dtype=torch.bool)
         self.p_vels = torch.zeros((batch_dim, self.n_agents, 2), device=device)
         self.raw_actions = torch.zeros((batch_dim, self.n_agents, 2), device=device)
+        self.prev_dist_a1_to_basket = torch.zeros(batch_dim, device=device)
+        self.contest_reward_this_step = torch.zeros(batch_dim, self.n_defenders, device=device)
 
         return world
 
@@ -135,6 +143,7 @@ class Scenario(BaseScenario):
         self.t_remaining[batch_range] = self.t_limit
         self.terminal_rewards[batch_range] = 0.0
         self.p_vels[batch_range] = 0.0
+        self.contest_reward_this_step[batch_range] = 0.0
 
         # 设置篮筐和投篮点位置
         basket_pos = torch.zeros(batch_dim, 2, device=self.world.device)
@@ -196,6 +205,10 @@ class Scenario(BaseScenario):
         dists = torch.linalg.norm(agent_positions - spot_pos.unsqueeze(1), dim=-1)
         self.prev_dist_to_spot[batch_range] = dists
 
+        # 初始化A1到篮筐的距离
+        dist_a1_basket = torch.linalg.norm(agent_positions[:, 0, :] - basket_pos, dim=-1)
+        self.prev_dist_a1_to_basket[batch_range] = dist_a1_basket
+
     def process_action(self, agent: Agent):
         # 保存模型输出的原始期望速度
         agent_idx = self.world.agents.index(agent)
@@ -255,6 +268,12 @@ class Scenario(BaseScenario):
         """
         # 记录当前帧的速度，作为下一帧的“上一帧速度”
         self.p_vels.copy_(self.all_vel)
+
+        # 更新A1到篮筐的距离
+        self.prev_dist_a1_to_basket.copy_(torch.linalg.norm(self.a1.state.pos - self.basket.state.pos, dim=-1))
+
+        # 更新A1到投篮点的距离
+        self.prev_dist_a1_to_spot.copy_(torch.linalg.norm(self.a1.state.pos - self.spot_center.state.pos, dim=-1))
 
         # 如果任何环境已结束，需要更新 prev_dist_to_spot 的最终值
         if torch.any(self.dones):
@@ -337,6 +356,10 @@ class Scenario(BaseScenario):
             # 4. 分配修正后的奖励
             self.terminal_rewards[shot_b_idx, :self.n_attackers] = final_score_modified.unsqueeze(-1)
             self.terminal_rewards[shot_b_idx, self.n_attackers:] = -final_score_modified.unsqueeze(-1)
+
+            # 5. 分配关键干扰奖励给防守方
+            for i, d_idx in enumerate(self.defenders):
+                self.contest_reward_this_step[shot_b_idx, i] = self.k_contest * total_block_factor
             
             dones |= shot_attempted
 
@@ -575,31 +598,84 @@ class Scenario(BaseScenario):
 
         else: # 防守方
             p_d = pos
+            agent_d_idx = self.defenders.index(agent)
             in_defensive_half = p_d[:, 1] > 0
             
-            # 1. 越过半场惩罚
-            dense_reward += torch.where(in_defensive_half, 0.0, self.overextend_penalty)
+            # 1. 越过半场惩罚 (与越界深度成正比)
+            # 只有当Y坐标小于0时才计算越界深度
+            overextend_depth = torch.where(p_d[:, 1] < 0, torch.abs(p_d[:, 1]), torch.zeros_like(p_d[:, 1]))
+            dense_reward -= self.k_overextend_penalty * overextend_depth
+
+            # 2. 压迫驱离奖励 (只在防守半场生效)
+            # 计算A1当前到篮筐的距离
+            current_dist_a1_to_basket = torch.linalg.norm(self.a1.state.pos - self.basket.state.pos, dim=-1)
+            # 如果A1被驱离篮筐，则奖励防守方
+            pressure_reward = self.k_pressure * (current_dist_a1_to_basket - self.prev_dist_a1_to_basket)
+            dense_reward += pressure_reward * in_defensive_half.float()
+
+            # 3. 有效站位奖励 (只在防守半场生效)
+            # 计算防守者到A1的距离
+            dist_d_a1 = torch.linalg.norm(p_d - self.a1.state.pos, dim=1)
             
-            # 2. 接近投篮点奖励
-            current_dist_to_spot = torch.linalg.norm(p_d - self.spot_center.state.pos, dim=1)
-            spot_approach_reward = (self.prev_dist_to_spot[:, agent_idx] - current_dist_to_spot) * self.k_def_spot_approach
-            dense_reward += spot_approach_reward * in_defensive_half.float()
-            self.prev_dist_to_spot[:, agent_idx] = current_dist_to_spot
+            # 计算A1到篮筐的向量
+            a1_to_basket_vec = self.basket.state.pos - self.a1.state.pos
+            a1_to_basket_norm_sq = torch.sum(a1_to_basket_vec**2, dim=-1, keepdim=True) + 1e-6
 
-            # 3. 封堵奖励
-            p_a1 = self.a1.state.pos
-            dist_to_a1 = torch.linalg.norm(p_d - p_a1, dim=1)
-            proximity_factor = torch.clamp(1.0 - (dist_to_a1 / self.def_proximity_threshold), min=0.0)
+            # 计算防守者到A1的向量
+            d_to_a1_vec = p_d - self.a1.state.pos
 
-            ap = self.basket.state.pos - p_a1
-            ad = p_d - p_a1
-            proj_len = torch.einsum("bd,bd->b", ad, ap) / (torch.linalg.norm(ap, dim=1).pow(2) + 1e-6)
-            proj_len = torch.clamp(proj_len, 0, 1)
-            closest_point_on_line = p_a1 + proj_len.unsqueeze(-1) * ap
-            dist_perp = torch.linalg.norm(p_d - closest_point_on_line, dim=1)
-            block_factor = torch.exp(-dist_perp.pow(2) / (2 * self.block_sigma ** 2))
-            block_reward = self.k_def_block * block_factor * proximity_factor
-            dense_reward += torch.where(in_defensive_half, block_reward, torch.zeros_like(block_reward))
+            # 计算防守者向量在A1到篮筐向量上的投影长度比例
+            proj_len_ratio = torch.sum(d_to_a1_vec * a1_to_basket_vec, dim=-1) / a1_to_basket_norm_sq.squeeze(-1)
+            
+            # 判断防守者是否在A1和篮筐之间 (0 < ratio < 1)
+            is_between_a1_basket = (proj_len_ratio > 0) & (proj_len_ratio < 1)
+
+            # 计算防守者到A1-篮筐连线的垂直距离
+            projection = proj_len_ratio.unsqueeze(-1) * a1_to_basket_vec
+            dist_perp = torch.linalg.norm(d_to_a1_vec - projection, dim=-1)
+
+            # 站位奖励：距离A1越近，且越靠近A1-篮筐连线，奖励越高
+            # 使用高斯衰减，距离越远，奖励越小
+            positioning_reward = self.k_positioning * torch.exp(-dist_d_a1.pow(2) / (2 * self.agent_radius**2)) * torch.exp(-dist_perp.pow(2) / (2 * self.agent_radius**2))
+            
+            # 只有当防守者在A1和篮筐之间时才给予站位奖励
+            dense_reward += positioning_reward * is_between_a1_basket.float() * in_defensive_half.float()
+
+            # 4. 关键干扰奖励 (事件驱动，只在防守半场生效)
+            dense_reward += self.contest_reward_this_step[:, agent_d_idx] * in_defensive_half.float()
+
+            # 重置关键干扰奖励，确保只在投篮发生的那一帧生效
+            self.contest_reward_this_step[:, agent_d_idx] = 0.0
+
+            # 5. 限制A1移动空间奖励 (只在防守半场生效)
+            dist_d_a1 = torch.linalg.norm(p_d - self.a1.state.pos, dim=1)
+            # 奖励防守者在一定范围内贴近A1，但不进入碰撞区域
+            # 理想距离范围：2*agent_radius (碰撞) 到 4*agent_radius
+            ideal_min_dist = self.agent_radius * 2.0
+            ideal_max_dist = self.agent_radius * 4.0
+
+            # 计算一个奖励因子，当距离在理想范围内时为正，否则为负或零
+            restriction_factor = torch.where(
+                (dist_d_a1 > ideal_min_dist) & (dist_d_a1 < ideal_max_dist),
+                1.0 - (dist_d_a1 - ideal_min_dist) / (ideal_max_dist - ideal_min_dist), # 距离越近，奖励越大
+                torch.zeros_like(dist_d_a1)
+            )
+            dense_reward += self.k_a1_restriction * restriction_factor * in_defensive_half.float()
+
+            # 6. 投篮区域控制奖励 (只在防守半场生效)
+            current_dist_a1_to_spot = torch.linalg.norm(self.a1.state.pos - self.spot_center.state.pos, dim=1)
+            
+            # 如果A1在投篮区域之外
+            is_a1_outside_spot = current_dist_a1_to_spot > self.R_spot
+            # 奖励防守方将A1推离投篮区域
+            spot_control_reward_outside = self.k_spot_control * (current_dist_a1_to_spot - self.prev_dist_a1_to_spot) * is_a1_outside_spot.float()
+            
+            # 如果A1在投篮区域之内
+            is_a1_inside_spot = ~is_a1_outside_spot
+            # 奖励防守方将A1推向区域边缘 (距离增加)，惩罚A1深入区域 (距离减少)
+            spot_control_reward_inside = self.k_spot_control * (current_dist_a1_to_spot - self.prev_dist_a1_to_spot) * is_a1_inside_spot.float()
+
+            dense_reward += (spot_control_reward_outside + spot_control_reward_inside) * in_defensive_half.float()
         
         # 返回稠密奖励和回合结束时的稀疏奖励之和
         return dense_reward + self.terminal_rewards[:, agent_idx]
