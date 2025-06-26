@@ -29,7 +29,7 @@ class Scenario(BaseScenario):
 
         # 终止条件阈值
         self.v_shot_threshold = kwargs.get("v_shot_threshold", 0.2)  # 投篮速度阈值
-        self.a_shot_threshold = kwargs.get("a_shot_threshold", 0.1)  # 投篮加速度阈值
+        self.a_shot_threshold = kwargs.get("a_shot_threshold", 3.0)  # 投篮加速度阈值
         self.v_foul_threshold = kwargs.get("v_foul_threshold", 2.0)  # 碰撞犯规速度阈值
 
         # 奖励系数
@@ -46,12 +46,20 @@ class Scenario(BaseScenario):
         self.overextend_penalty = kwargs.get("overextend_penalty", -6.0)  # 防守方越过半场的惩罚
         self.k_def_spot_approach = kwargs.get("k_def_spot_approach", 0.01)  # 防守方接近隐藏投篮点的奖励系数
         self.k_a1_blocked_penalty = kwargs.get("k_a1_blocked_penalty", -1.0)  # A1被封堵的惩罚系数
-        self.k_velocity_penalty = kwargs.get("k_velocity_penalty", 0.5)
+        self.k_velocity_penalty = kwargs.get("k_velocity_penalty", 0.2)
         self.k_a2_screen = kwargs.get("k_a2_screen", 3.0)  # A2执行掩护的奖励系数
         self.k_a2_crowding_penalty = kwargs.get("k_a2_crowding_penalty", 1.5)  # A2因过于靠近A1而受到的扎堆惩罚系数
         self.screen_sigma = kwargs.get("screen_sigma", 0.5)
-        self.gaussian_sigma = kwargs.get("gaussian_sigma", self.R_spot) # 高斯引导奖励的sigma
-        self.gaussian_scale = kwargs.get("gaussian_scale", self.k_a1_approach * 2.0) # 高斯引导奖励的缩放系数
+        self.gaussian_sigma = kwargs.get("gaussian_sigma", self.R_spot * 0.8) # 高斯引导奖励的sigma
+        self.gaussian_scale = kwargs.get("gaussian_scale", self.k_a1_approach * 5.0) # 高斯引导奖励的缩放系数
+        self.low_velocity_threshold = kwargs.get("low_velocity_threshold", 1.0) # 低速推挤判定阈值
+        self.k_push_penalty = kwargs.get("k_push_penalty", 5.0) # 主动推挤惩罚系数
+        self.k_u_penalty_general = kwargs.get("k_u_penalty_general", 0.01) # 全局控制量惩罚系数
+        self.k_u_penalty_a1_in_spot = kwargs.get("k_u_penalty_a1_in_spot", 0.005) # A1在投篮点的额外控制量惩罚
+        self.proximity_threshold = kwargs.get("proximity_threshold", self.agent_radius * 2.2) # 近距离惩罚阈值 (直径的1.1倍)
+        self.proximity_penalty_margin = kwargs.get("proximity_penalty_margin", 0.15)      # 近距离惩罚曲线的软度
+        self.k_proximity_penalty = kwargs.get("k_proximity_penalty", 2.5)      # 近距离惩罚系数
+
 
         # ----------------- 环境构建 (World Setup) -----------------
         self.max_steps = int(self.t_limit / self.dt)
@@ -107,6 +115,7 @@ class Scenario(BaseScenario):
         self.terminal_rewards = torch.zeros(batch_dim, self.n_agents, device=device)
         self.dones = torch.zeros(batch_dim, device=device, dtype=torch.bool)
         self.p_vels = torch.zeros((batch_dim, self.n_agents, 2), device=device)
+        self.raw_actions = torch.zeros((batch_dim, self.n_agents, 2), device=device)
 
         return world
 
@@ -188,6 +197,10 @@ class Scenario(BaseScenario):
         self.prev_dist_to_spot[batch_range] = dists
 
     def process_action(self, agent: Agent):
+        # 保存模型输出的原始期望速度
+        agent_idx = self.world.agents.index(agent)
+        self.raw_actions[:, agent_idx, :] = agent.action.u.clone()
+
         # 忽略过小的动作输入 (死区)
         action_norm = torch.linalg.vector_norm(agent.action.u, dim=1)
         agent.action.u[action_norm < 0.1] = 0.0
@@ -221,8 +234,8 @@ class Scenario(BaseScenario):
         
         # 2. 使用广播计算成对(pairwise)的相对位置和距离
         #    (B, N, 1, 2) - (B, 1, N, 2) -> (B, N, N, 2)
-        pos_diffs = self.all_pos.unsqueeze(2) - self.all_pos.unsqueeze(1)
-        self.dist_matrix = torch.linalg.norm(pos_diffs, dim=-1) # (B, N, N)
+        self.pos_diffs = self.all_pos.unsqueeze(2) - self.all_pos.unsqueeze(1)
+        self.dist_matrix = torch.linalg.norm(self.pos_diffs, dim=-1) # (B, N, N)
 
         # 3. 计算碰撞矩阵
         self.collision_matrix = self.dist_matrix < (self.agent_radius * 2)
@@ -256,7 +269,8 @@ class Scenario(BaseScenario):
         dist_to_spot = torch.linalg.norm(self.a1.state.pos - self.spot_center.state.pos, dim=1)
         in_area = (dist_to_spot <= self.R_spot) & (self.a1.state.pos[:, 1] > 0)
         stopped = torch.linalg.norm(self.a1.state.vel, dim=1) < self.v_shot_threshold
-        not_accelerating = torch.linalg.norm(self.a1.action.u, dim=1) < self.a_shot_threshold
+        # 使用原始期望速度判断是否“意图”停止
+        not_accelerating = torch.linalg.norm(self.raw_actions[:, 0, :], dim=1) < self.a_shot_threshold
         
         # 仅在未结束的环境中检查此条件
         shot_attempted = in_area & stopped & not_accelerating & ~dones
@@ -416,11 +430,40 @@ class Scenario(BaseScenario):
         pos = agent.state.pos
         is_oob = (torch.abs(pos[:, 0]) > (0.99 * self.W / 2)) | \
                  (torch.abs(pos[:, 1]) > (0.99 * self.L / 2))
-        dense_reward[is_oob] += self.oob_penalty
+        dense_reward[is_oob] += self.oob_penalty * (torch.linalg.norm(agent.state.vel[is_oob], dim=1)+1)
+        agent.state.vel[is_oob] = 0.0
+
+        # 使用原始期望速度计算通用控制量惩罚
+        raw_u_norm = torch.linalg.vector_norm(self.raw_actions[:, agent_idx, :], dim=1)
+        dense_reward -= self.k_u_penalty_general * raw_u_norm
+
+        # 新增：基于物理引擎的平滑近距离惩罚，避免扎堆
+        agent_dists = self.dist_matrix[:, agent_idx, :]
+        # 排除自己与自己的距离，避免不必要的计算
+        agent_dists[:, agent_idx] = self.proximity_threshold
+
+        # 找出所有小于阈值的距离，但不包括已经碰撞的
+        collision_dist = self.agent_radius * 2
+        is_too_close = (agent_dists < self.proximity_threshold) & (agent_dists > collision_dist)
+        if torch.any(is_too_close):
+            # 使用 logaddexp (Softplus) 函数计算平滑的侵入深度
+            k = self.proximity_penalty_margin
+            penetration = torch.logaddexp(
+                torch.tensor(0.0, device=self.world.device),
+                (self.proximity_threshold - agent_dists) / k,
+            ) * k
+
+            # 计算最终惩罚
+            proximity_penalty = -self.k_proximity_penalty * penetration
+
+            # 只对过于接近的智能体施加惩罚
+            total_proximity_penalty = (proximity_penalty * is_too_close.float()).sum(dim=1)
+            dense_reward += total_proximity_penalty
 
         # 碰撞惩罚 (使用 pre_step 中计算好的矩阵)
         agent_collisions = self.collision_matrix[:, agent_idx, :]
         if torch.any(agent_collisions):
+            # 1. 高速碰撞惩罚 (基于相对速度)
             # 判断主动/被动碰撞
             pos_rel = self.all_pos - pos.unsqueeze(1) # (B, N, 2)
             vel_proj = torch.einsum("bd,bnd->bn", agent.state.vel, pos_rel)
@@ -436,6 +479,29 @@ class Scenario(BaseScenario):
             # 只在碰撞时施加惩罚
             total_collision_penalty = (penalty * agent_collisions.float()).sum(dim=1)
             dense_reward += total_collision_penalty
+
+            # 2. 低速推挤惩罚 (基于原始期望速度)
+            is_low_speed_collision = agent_collisions & (self.vel_diffs_norm[:, agent_idx, :] < self.low_velocity_threshold)
+            if torch.any(is_low_speed_collision):
+                # 获取智能体的原始期望速度
+                raw_action_force = self.raw_actions[:, agent_idx, :]
+
+                # 计算控制力在相对位置向量上的投影
+                pos_diffs_agent_centric = self.pos_diffs[:, agent_idx, :, :]
+                raw_action_force_expanded = raw_action_force.unsqueeze(1).expand(-1, self.n_agents, -1)
+
+                pos_diffs_norm = torch.linalg.norm(pos_diffs_agent_centric, dim=-1, keepdim=True) + 1e-6
+                proj_vector = (pos_diffs_agent_centric / pos_diffs_norm)
+                
+                push_force_magnitude = torch.einsum('bnd,bnd->bn', raw_action_force_expanded, proj_vector)
+
+                # 只惩罚正向推力 (即推向对方)
+                push_penalty = -self.k_push_penalty * torch.clamp(push_force_magnitude, min=0.0)
+                
+                # 只在低速碰撞时施加惩罚
+                total_push_penalty = (push_penalty * is_low_speed_collision.float()).sum(dim=1)
+                dense_reward += total_push_penalty
+
 
         # --- 分角色奖励/惩罚 ---
         if agent == self.a1:
@@ -458,6 +524,9 @@ class Scenario(BaseScenario):
             dense_reward += velocity_penalty
             # ######################################
             
+            # 新增：在投篮区内时，施加更大的控制量惩罚以鼓励静止 (基于原始期望速度)
+            dense_reward -= self.k_u_penalty_a1_in_spot * raw_u_norm * is_in_spot.float()
+
             # 4. 被封堵惩罚 (保持不变)
             def_pos = torch.stack([d.state.pos for d in self.defenders], dim=1) # (B, D, 2)
             ap = self.basket.state.pos.unsqueeze(1) - pos.unsqueeze(1)  # (B, 1, 2)
