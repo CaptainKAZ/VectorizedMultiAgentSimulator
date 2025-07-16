@@ -3,6 +3,7 @@
 #  All rights reserved.
 import random
 import time
+import pprint
 
 import torch
 
@@ -116,11 +117,13 @@ def use_vmas_env(
 
 if __name__ == "__main__":
     use_vmas_env(
-        scenario_name="waterfall",
-        render=True,
+        scenario_name="layup",
+        render=False,
         save_render=False,
-        random_action=False,
+        random_action=True,
         continuous_actions=False,
+        device="cpu",
+        num_envs=8192,
         # Environment specific
         n_agents=4,
     )

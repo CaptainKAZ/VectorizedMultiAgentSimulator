@@ -47,7 +47,10 @@ def run_heuristic(
         step += 1
         actions = [None] * len(obs)
         for i in range(len(obs)):
-            actions[i] = policy.compute_action(obs[i], u_range=env.agents[i].u_range)
+            if i == 0:
+                actions[i] = policy.compute_action(obs[i], u_range=env.agents[i].u_range)
+            else :
+                actions[i] = torch.zeros_like(actions[0])
         obs, rews, dones, info = env.step(actions)
         rewards = torch.stack(rews, dim=1)
         global_reward = rewards.mean(dim=1)
@@ -73,12 +76,12 @@ def run_heuristic(
 
 
 if __name__ == "__main__":
-    from vmas.scenarios.transport import HeuristicPolicy as TransportHeuristic
+    from vmas.scenarios.layup_heuristic import HeuristicPolicy_BoundaryAwarePlanner
 
     run_heuristic(
-        scenario_name="transport",
-        heuristic=TransportHeuristic,
-        n_envs=300,
+        scenario_name="layup",
+        heuristic=HeuristicPolicy_BoundaryAwarePlanner,
+        n_envs=1,
         n_steps=200,
         render=True,
         save_render=False,

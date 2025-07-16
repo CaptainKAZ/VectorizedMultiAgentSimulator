@@ -23,6 +23,12 @@ from vmas.simulator.environment.gym import GymWrapper
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.utils import save_video
 
+from torch.profiler import profile, record_function, ProfilerActivity
+
+import time
+import pprint
+
+
 N_TEXT_LINES_INTERACTIVE = 6
 
 
@@ -79,6 +85,7 @@ class InteractiveEnv:
         self._init_text()
         self.env.unwrapped.viewer.window.on_key_press = self._key_press
         self.env.unwrapped.viewer.window.on_key_release = self._key_release
+        # self.plotter = RealTimeRewardPlotter(self.n_agents)
 
         self._cycle()
 
@@ -98,8 +105,10 @@ class InteractiveEnv:
                         self.frame_list,
                         fps=1 / self.env.unwrapped.world.dt,
                     )
+                time.sleep(3)
                 self.env.reset()
                 self.reset = False
+                # self.plotter.reset()
                 total_rew = [0] * self.n_agents
 
             if self.n_agents > 0:
@@ -118,9 +127,14 @@ class InteractiveEnv:
                 ] = self.u2[
                     : self.agents[self.current_agent_index2].dynamics.needed_action_size
                 ]
-
+            start_time = time.time()
             obs, rew, done, info = self.env.step(action_list)
-
+            stop_time = time.time()
+            print(f"calc:{stop_time-start_time}")
+            # self.plotter.update(rew)
+            # pprint.pprint(obs[0])
+            # time.sleep(self.env.unwrapped.world.dt)
+            
             if self.display_info and self.n_agents > 0:
                 # TODO: Determine number of lines of obs_str and render accordingly
                 obs_str = str(InteractiveEnv.format_obs(obs[self.current_agent_index]))

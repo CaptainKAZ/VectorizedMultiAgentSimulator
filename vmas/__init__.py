@@ -29,6 +29,7 @@ scenarios = sorted(
         "give_way",
         "wheel",
         "balance",
+        "layup",
         "football",
         "discovery",
         "flocking",
