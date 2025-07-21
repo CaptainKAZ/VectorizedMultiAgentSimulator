@@ -24,6 +24,7 @@ def calculate_rewards_and_dones_jit(
     collision_matrix: torch.Tensor,
     vel_diffs_norm: torch.Tensor,
     requested_accelerations_tensor: torch.Tensor,
+    a1_normalized_speed_k: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     JIT兼容的全向量化函数，用于并行计算奖励和回合终止信号。
@@ -163,31 +164,37 @@ def calculate_rewards_and_dones_jit(
         a1_pos_timeout = a1_pos[time_up]
         dist_a1_to_spot_timeout = torch.linalg.norm(a1_pos_timeout - spot_center_pos[time_up], dim=-1)
 
-        # --- 新增逻辑：判断A1是否在投篮圈内 ---
+        # --- 判断A1是否在投篮圈内 ---
         is_in_spot = dist_a1_to_spot_timeout <= h_params['R_spot']
 
-        # --- 分别定义圈内和圈外的惩罚 ---
-        # 圈内：一个新的恒定惩罚值 (注意前面的负号)
-        penalty_in_spot = -h_params['attacker_timeout_in_spot_penalty']
-        
-        # 圈外：保持原有的基于距离的惩罚
-        penalty_out_of_spot = -h_params['attacker_timeout_penalty'] - h_params['k_timeout_dist_penalty'] * dist_a1_to_spot_timeout
+        # --- 分别定义圈内和圈外的奖励 ---
+        # 圈内：一个微小的恒定正奖励
+        # 注意：这里需要确保 reward_in_spot 是一个张量以便 torch.where 能正常工作
+        reward_in_spot = torch.full_like(dist_a1_to_spot_timeout, h_params['attacker_timeout_reward_in_spot'])
 
-        # --- 使用 torch.where 根据条件选择最终惩罚 ---
-        attacker_penalty = torch.where(is_in_spot, penalty_in_spot, penalty_out_of_spot)
+        # 圈外：一个与距离负相关的奖励 (距离越远，奖励越低)
+        reward_out_of_spot = h_params['attacker_timeout_base_reward_out_spot'] - h_params['k_timeout_dist_reward_factor'] * dist_a1_to_spot_timeout
 
-        # --- [重要修正] 修正了原有的clamp逻辑，使其能正确施加负惩罚 ---
-        # 将惩罚值钳位在一个负数区间 [ -max_penalty, 0 ]
-        attacker_penalty_clamped = torch.clamp(
-            attacker_penalty, 
-            min=-h_params['attacker_timeout_penalty_max'], 
-            max=0.0
+        # --- 使用 torch.where 根据条件选择最终奖励 ---
+        attacker_reward = torch.where(is_in_spot, reward_in_spot, reward_out_of_spot)
+
+        # --- 将奖励值钳位在一个小的正数区间 [0, max_reward] ---
+        attacker_reward_clamped = torch.clamp(
+            attacker_reward,
+            min=-h_params['attacker_timeout_reward_max'],
+            max=h_params['attacker_timeout_reward_max']
         )
-        
-        terminal_rewards[time_up, 0] = attacker_penalty_clamped
-        terminal_rewards[time_up, 1] = h_params["foul_teammate_factor"] * attacker_penalty_clamped
-        terminal_rewards[time_up, n_attackers:] = -attacker_penalty_clamped.unsqueeze(-1)
-        reason_code[time_up] = 12 # 原因码12: 进攻超时
+
+        # --- 为进攻方分配奖励 ---
+        # A1 (持球者) 获得主要奖励
+        terminal_rewards[time_up, 0] = attacker_reward_clamped
+        # A2 (队友) 获得关联奖励
+        terminal_rewards[time_up, 1] = h_params["foul_teammate_factor"] * attacker_reward_clamped
+
+        # --- 为防守方分配一个微小的固定奖励 ---
+        terminal_rewards[time_up, n_attackers:] = h_params['defender_timeout_reward']
+
+        reason_code[time_up] = 12 # 原因码12: 进攻超时 (保持不变)
         dones_out |= time_up
     
     # --- 条件3: 碰撞犯规 (Foul) ---
@@ -505,7 +512,7 @@ def calculate_rewards_and_dones_jit(
     vector_to_spot = spot_center_pos - a1_pos
     vector_to_spot_norm = vector_to_spot / (torch.linalg.norm(vector_to_spot, dim=1, keepdim=True) + 1e-6)
     speed_projection = torch.sum(a1_vel * vector_to_spot_norm, dim=1)
-    speed_spot_reward = h_params['k_a1_speed_spot_reward'] * (1 - a1_gaussian_factor)  * speed_projection
+    speed_spot_reward = a1_normalized_speed_k * speed_projection
     
     # 3. 在投篮区域内的存在奖励
     in_spot_reward = h_params['k_a1_in_spot_reward'] * (1.5 - dist_a1_to_spot / h_params['R_spot']) * is_in_spot_a1.float()
