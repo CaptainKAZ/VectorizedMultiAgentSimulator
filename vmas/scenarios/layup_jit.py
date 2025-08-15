@@ -675,7 +675,7 @@ def calculate_rewards_and_dones_jit(
 
     # 4.3 防守者奖励/惩罚
     def_pos = all_pos[:, n_attackers:]
-    def_vel = all_vel[:, n_attackers:]
+    # def_vel = all_vel[:, n_attackers:]
     
     in_defensive_half = def_pos[..., 1] > 0
     overextend_depth = torch.where(def_pos[..., 1] < 0, torch.abs(def_pos[..., 1]) + 1, torch.zeros_like(def_pos[..., 1]))
@@ -690,6 +690,9 @@ def calculate_rewards_and_dones_jit(
     proj_dot_product = torch.sum(d_to_a1_vec * a1_to_basket_unit_vec, dim=-1)
     soft_gate_factor_def = torch.sigmoid(5.0 * proj_dot_product)
     final_positioning_reward = base_positioning_reward * soft_gate_factor_def * in_defensive_half.float()
+
+    penetration_depth = torch.clamp(a1_pos[:, 1], min=0.0)
+    a1_penetration_penalty = -h_params['k_def_a1_penetration_penalty'] * (penetration_depth ** 2)
     
     a1_in_defensive_half = a1_pos[:, 1] > 0
     is_guarding_context = in_defensive_half & a1_in_defensive_half.unsqueeze(1)
@@ -707,7 +710,7 @@ def calculate_rewards_and_dones_jit(
     def_gaussian_reward = h_params['k_def_gaussian_spot'] * torch.exp(- (dist_d_to_spot_all**2) / (2 * h_params['def_gaussian_spot_sigma']**2))
     def_gaussian_reward *= in_defensive_half.float()
     
-    total_def_reward = overextend_penalty + final_positioning_reward + final_spot_control_reward + def_gaussian_reward
+    total_def_reward = overextend_penalty + final_positioning_reward + final_spot_control_reward + def_gaussian_reward + a1_penetration_penalty.unsqueeze(1)
     dense_reward[:, n_attackers:] += total_def_reward
 
     # --- 5. 时间紧迫性惩罚/奖励 ---

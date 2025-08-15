@@ -1,6 +1,5 @@
 # 导入必要的库
 from traceback import print_tb
-from sympy import false
 import torch
 from typing import Dict, Tuple
 from vmas import render_interactively
@@ -92,8 +91,8 @@ class Scenario(BaseScenario):
         self.v_max = kwargs.get("v_max", 5.0)
         
         # ========== 2. 终止条件阈值 (Termination Thresholds) ==========
-        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.2)
-        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.4)
+        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.3)
+        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.8)
         self.h_params["v_foul_threshold"] = kwargs.get("v_foul_threshold", 0.6)
         self.h_params["shot_still_frames"] = kwargs.get("shot_still_frames", 5)
 
@@ -105,11 +104,11 @@ class Scenario(BaseScenario):
         self.h_params["k_a1_in_spot_reward"] = kwargs.get("k_a1_in_spot_reward", 3.0)
         self.h_params["k_a1_speed_spot_reward"] = kwargs.get("k_a1_speed_spot_reward", 1500.0)
         self.h_params["k_velocity_penalty"] = kwargs.get("k_velocity_penalty", 0.01)
-        self.h_params["k_a1_ready_to_shoot_reward"] = kwargs.get("k_a1_ready_to_shoot_reward", 60.0)
-        self.h_params["k_a1_velocity_stillness_reward"] = kwargs.get("k_a1_velocity_stillness_reward", 30.0)
-        self.h_params["velocity_stillness_sigma"] = kwargs.get("velocity_stillness_sigma", 0.2)
-        self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 20)
-        self.h_params["action_stillness_sigma"] = kwargs.get("action_stillness_sigma", 0.3)
+        self.h_params["k_a1_ready_to_shoot_reward"] = kwargs.get("k_a1_ready_to_shoot_reward", 50.0)
+        self.h_params["k_a1_velocity_stillness_reward"] = kwargs.get("k_a1_velocity_stillness_reward", 10.0)
+        self.h_params["velocity_stillness_sigma"] = kwargs.get("velocity_stillness_sigma", 0.4)
+        self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 30)
+        self.h_params["action_stillness_sigma"] = kwargs.get("action_stillness_sigma", 0.4)
         self.h_params["block_gate_k"] = kwargs.get("block_gate_k", 10.0)
         self.h_params['k_a1_separation_reward'] = kwargs.get("k_a1_separation_reward", 40.0)
         self.h_params["k_a1_blocked_penalty"] = kwargs.get("k_a1_blocked_penalty", -70.0)
@@ -134,8 +133,9 @@ class Scenario(BaseScenario):
         self.h_params["k_a2_interference_reward"] = kwargs.get("k_a2_interference_reward", 40.0)
         self.h_params["time_penalty_grace_period"] = kwargs.get("time_penalty_grace_period", 8)
         self.h_params["k_attacker_time_penalty"] = kwargs.get("k_attacker_time_penalty", 2)
-        self.h_params["k_defender_time_bonus"] = kwargs.get("k_defender_time_bonus", 0.02)
-        self.h_params["k_positioning"] = kwargs.get("k_positioning", 60.0)
+        self.h_params["k_defender_time_bonus"] = kwargs.get("k_defender_time_bonus", 1.5)
+        self.h_params["k_positioning"] = kwargs.get("k_positioning", 40.0)
+        self.h_params["k_def_a1_penetration_penalty"] = kwargs.get("k_def_a1_penetration_penalty", 10.0)
         self.h_params["k_spot_control_reward"] = kwargs.get("k_spot_control_reward", 3.0) # 奖励系数，用于奖励成功迫使A1远离投篮点的防守行为
         self.h_params["def_guard_threshold"] = kwargs.get("def_guard_threshold", self.h_params["agent_radius"] * 8.0) # 盯防判定距离
         self.h_params["k_overextend_penalty"] = kwargs.get("k_overextend_penalty", 240.0)
@@ -154,8 +154,8 @@ class Scenario(BaseScenario):
         self.h_params["k_def_proximity_penalty"] = kwargs.get("k_def_proximity_penalty", 90.0)
         self.h_params["proximity_penalty_reduction_in_spot"] = kwargs.get("proximity_penalty_reduction_in_spot", 0.2)
         self.h_params["low_velocity_threshold"] = kwargs.get("low_velocity_threshold", self.h_params['v_foul_threshold'])
-        self.h_params["k_push_penalty"] = kwargs.get("k_push_penalty", 800.0)
-        self.h_params["k_def_push_penalty"] = kwargs.get("k_def_push_penalty", 800.0)
+        self.h_params["k_push_penalty"] = kwargs.get("k_push_penalty", 40.0)
+        self.h_params["k_def_push_penalty"] = kwargs.get("k_def_push_penalty", 40.0)
         self.h_params["stand_still_threshold"] = kwargs.get("stand_still_threshold", self.h_params['v_foul_threshold'])
         self.h_params["k_stand_still_reward"] = kwargs.get("k_stand_still_reward", 20.0)
         self.h_params["charge_drawing_range"] = kwargs.get("charge_drawing_range", self.h_params["agent_radius"] * 6.0)
@@ -163,25 +163,25 @@ class Scenario(BaseScenario):
         self.h_params["k_action_jerk_penalty"] = kwargs.get("k_action_jerk_penalty", 0.05)
         
         # ========== 4. 终局奖励/惩罚系数 (Terminal Reward/Penalty Coefficients) ==========
-        self.h_params["max_score"] = kwargs.get("max_score", 4000.0)
-        self.h_params["shoot_score"] = kwargs.get("shoot_score", 6000.0)
+        self.h_params["max_score"] = kwargs.get("max_score", 6000.0)
+        self.h_params["shoot_score"] = kwargs.get("shoot_score", 4000.0)
         self.h_params["k_spacing_bonus"] = kwargs.get("k_spacing_bonus", 1000.0)
         self.h_params["k_a2_screen_bonus"] = kwargs.get("k_a2_screen_bonus", 2000.0)
         self.h_params["a2_screen_sigma"] = kwargs.get("a2_screen_sigma", 4 * self.h_params["agent_radius"])
-        self.h_params["k_time_bonus"] = kwargs.get("k_time_bonus", 3000.0) # 投篮时间奖励系数
-        self.h_params["R_foul"] = kwargs.get("R_foul", 5000.0)
-        self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 1500.0)
+        self.h_params["k_time_bonus"] = kwargs.get("k_time_bonus", 4000.0) # 投篮时间奖励系数
+        self.h_params["R_foul"] = kwargs.get("R_foul", 4000.0)
+        self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 100.0)
         self.h_params["attacker_timeout_reward_max"] = kwargs.get("attacker_timeout_reward_max", 2000)
         self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 100.0)
         self.h_params["attacker_timeout_base_reward_out_spot"] = kwargs.get("attacker_timeout_base_reward_out_spot", 0.0)
         self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", 100.0)
-        self.h_params["defender_timeout_reward"] = kwargs.get("defender_timeout_reward", 2000.0)
-        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 900.0)
-        self.h_params["k_def_force_reward"] = kwargs.get("k_def_force_reward", 500.0)
+        self.h_params["defender_timeout_reward"] = kwargs.get("defender_timeout_reward", 1000.0)
+        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 1500.0)
+        self.h_params["k_def_force_reward"] = kwargs.get("k_def_force_reward", 600.0)
         self.h_params["k_def_pos_reward"] = kwargs.get("k_def_pos_reward", 100.0)
         self.h_params["k_def_area_reward"] = kwargs.get("k_def_area_reward", 150.0)
         self.h_params["k_def_shot_penalty"] = kwargs.get("k_def_shot_penalty", 300.0)
-        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.0)
+        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.05)
         self.h_params["wall_collision_frames"] = kwargs.get("wall_collision_frames", 20.0)
         self.h_params["R_wall_collision_penalty"] = kwargs.get("R_wall_collision_penalty", -11000.0)
         self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 10000.0)
@@ -311,7 +311,7 @@ class Scenario(BaseScenario):
         self.basket.set_pos(basket_pos, batch_index=env_index)
 
         spot_x = (torch.rand(batch_dim, 1, device=self.world.device) - 0.5) * (self.h_params["W"]-self.h_params["R_spot"])
-        spot_y = torch.rand(batch_dim, 1, device=self.world.device) * (self.h_params["L"] / 4) + (self.h_params["R_spot"]/2)
+        spot_y = torch.rand(batch_dim, 1, device=self.world.device) * (self.h_params["L"] / 4) + (self.h_params["R_spot"])
         spot_pos = torch.cat([spot_x, spot_y], dim=1)
         self.spot_center.set_pos(spot_pos, batch_index=env_index)
         self.shooting_area_vis.set_pos(spot_pos, batch_index=env_index)
@@ -535,58 +535,53 @@ class Scenario(BaseScenario):
         agent_idx = self.world.agents.index(agent)
         is_attacker = agent_idx < self.n_attackers
 
-        # 【核心修改】
-        # 位置信息使用各智能体当前的 state.pos (瞬时)
-        # 速度信息对于其他智能体，使用 self.p_vels (上一时刻)
-
-        # 自身的状态总是瞬时的
+        # --- 1. 为每个逻辑实体创建独立的、未填充的张量 ---
         self_pos = agent.state.pos
         self_vel = agent.state.vel
-
-        # 根据角色定义队友和对手
+        
+        # ... (获取队友和对手信息的代码不变) ...
         if is_attacker:
-            # agent是进攻方
             teammate_idx = 1 - agent_idx
             opp1_idx, opp2_idx = self.n_attackers, self.n_attackers + 1
-            
-            # 进攻方关注投篮点
-            key_info_rel = self.spot_center.state.pos - self_pos
-        else:
-            # agent是防守方
+        else: 
             teammate_idx = 1 - (agent_idx - self.n_attackers) + self.n_attackers
             opp1_idx, opp2_idx = 0, 1
             
-            # 防守方关注A1到篮筐的路径
-            key_info_rel = self.basket.state.pos - self.world.agents[0].state.pos
-
-        # 为了方便索引，我们直接从 world.agents 和 self.p_vels 中获取信息
         teammate = self.world.agents[teammate_idx]
         opp1 = self.world.agents[opp1_idx]
         opp2 = self.world.agents[opp2_idx]
 
-        # 将所有信息拼接成一个观测向量
+        self_obs = torch.cat([self_pos, self_vel], dim=-1)
+        teammate_obs = torch.cat([teammate.state.pos - self_pos, self.p_vels[:, teammate_idx] - self_vel], dim=-1)
+        opp1_obs = torch.cat([opp1.state.pos - self_pos, self.p_vels[:, opp1_idx] - self_vel], dim=-1)
+        opp2_obs = torch.cat([opp2.state.pos - self_pos, self.p_vels[:, opp2_idx] - self_vel], dim=-1)
+        
+        spot_rel_pos = self.spot_center.state.pos - self_pos
+        basket_rel_pos = self.basket.state.pos - self_pos
+        time_obs = self.t_remaining / self.h_params["t_limit"]
+
+        # --- 2. 对每个实体独立填充到4维 ---
+        # F.pad(tensor, (左填充, 右填充))
+        if is_attacker:
+            spot_padded = torch.nn.functional.pad(spot_rel_pos, (0, 2))
+        else:
+            spot_padded = torch.zeros_like(self_obs) # 防守方不知道投篮点，用全0填充
+
+        basket_padded = torch.nn.functional.pad(basket_rel_pos, (0, 2))
+        time_padded = torch.nn.functional.pad(time_obs, (0, 3))
+
+        # --- 3. 将所有维度统一的实体拼接成一个扁平的28维向量 ---
+        # 7个实体 * 每个4维 = 28维
         obs = torch.cat([
-            # 1. 自身状态 (瞬时)
-            self_pos,
-            self_vel,
-            
-            # 2. 队友信息 (位置瞬时, 速度上一时刻)
-            teammate.state.pos - self_pos,
-            self.p_vels[:, teammate_idx] - self_vel, # <- 使用 p_vels
-
-            # 3. 对手1信息 (位置瞬时, 速度上一时刻)
-            opp1.state.pos - self_pos,
-            self.p_vels[:, opp1_idx] - self_vel, # <- 使用 p_vels
-            
-            # 4. 对手2信息 (位置瞬时, 速度上一时刻)
-            opp2.state.pos - self_pos,
-            self.p_vels[:, opp2_idx] - self_vel, # <- 使用 p_vels
-
-            # 5. 其他关键信息 (瞬时)
-            key_info_rel,
-            self.t_remaining / self.h_params["t_limit"],
+            self_obs,
+            teammate_obs,
+            opp1_obs,
+            opp2_obs,
+            spot_padded,
+            basket_padded,
+            time_padded,
         ], dim=-1)
-
+    
         return obs
     
     def extra_render(self, env_index: int):
