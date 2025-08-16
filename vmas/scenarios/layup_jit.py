@@ -114,7 +114,19 @@ def calculate_rewards_and_dones_jit(
         dist_a1_to_defs = torch.linalg.norm(blocker_vector, dim=-1)
         avg_dist_to_defs = torch.mean(dist_a1_to_defs, dim=1)
         spacing_bonus = h_params['k_spacing_bonus'] * avg_dist_to_defs
-        a1_reward = final_score_modified + spacing_bonus + time_bonus
+        
+        a1_vel_shot = a1_vel[shot_b_idx]
+        a1_raw_action_shot = raw_actions[shot_b_idx, 0, :]
+        # 计算速度和动作的模长（大小）
+        a1_speed_shot = torch.linalg.norm(a1_vel_shot, dim=-1)
+        a1_action_norm_shot = torch.linalg.norm(a1_raw_action_shot, dim=-1)
+        
+        # 使用指数衰减函数计算奖励：速度/动作越小，e^(-x) 越接近1，奖励越高
+        vel_stillness_bonus = h_params['k_shot_stillness_vel_bonus'] * torch.exp(-a1_speed_shot)
+        act_stillness_bonus = h_params['k_shot_stillness_act_bonus'] * torch.exp(-a1_action_norm_shot)
+
+        a1_reward = final_score_modified + spacing_bonus + time_bonus + vel_stillness_bonus + act_stillness_bonus
+
         terminal_rewards[shot_b_idx, 0] += a1_reward
 
         dist_a1_to_defs_sq = torch.sum(blocker_vector**2, dim=-1)
@@ -167,15 +179,26 @@ def calculate_rewards_and_dones_jit(
         # --- 判断A1是否在投篮圈内 ---
         is_in_spot = dist_a1_to_spot_timeout <= h_params['R_spot']
 
-        # --- 分别定义圈内和圈外的奖励 ---
-        # 圈内：一个微小的恒定正奖励
-        # 注意：这里需要确保 reward_in_spot 是一个张量以便 torch.where 能正常工作
-        reward_in_spot = torch.full_like(dist_a1_to_spot_timeout, h_params['attacker_timeout_reward_in_spot'])
+        # --- [新] 计算超时瞬间的移动惩罚 ---
+        # 获取超时瞬间 A1 的速度和原始动作
+        a1_vel_timeout = a1_vel[time_up]
+        a1_raw_action_timeout = raw_actions[time_up, 0, :]
+        # 计算速度和动作的模长
+        a1_speed_timeout = torch.linalg.norm(a1_vel_timeout, dim=-1)
+        a1_action_norm_timeout = torch.linalg.norm(a1_raw_action_timeout, dim=-1)
 
-        # 圈外：一个与距离负相关的奖励 (距离越远，奖励越低)
+        # 惩罚与速度/动作大小成正比
+        vel_penalty = h_params['k_timeout_move_vel_penalty'] * a1_speed_timeout
+        act_penalty = h_params['k_timeout_move_act_penalty'] * a1_action_norm_timeout
+        total_movement_penalty = vel_penalty + act_penalty
+
+        # --- 分别定义圈内和圈外的奖励 ---
+        # 圈内奖励 = 基础奖励 - 移动惩罚
+        reward_in_spot = h_params['attacker_timeout_reward_in_spot'] - total_movement_penalty
         reward_out_of_spot = h_params['attacker_timeout_base_reward_out_spot'] - h_params['k_timeout_dist_reward_factor'] * dist_a1_to_spot_timeout
 
         # --- 使用 torch.where 根据条件选择最终奖励 ---
+        # 移动惩罚只在 is_in_spot 为 True 时生效
         attacker_reward = torch.where(is_in_spot, reward_in_spot, reward_out_of_spot)
 
         # --- 将奖励值钳位在一个小的正数区间 [0, max_reward] ---
@@ -629,29 +652,57 @@ def calculate_rewards_and_dones_jit(
     # 4.2 A2 (无球掩护者) 奖励/惩罚
     p_a1 = all_pos[:, 0]
     p_a2 = all_pos[:, 1]
-    
-    dist_a1_to_defs = torch.linalg.norm(p_a1.unsqueeze(1) - def_pos, dim=-1)
-    closest_def_indices = torch.argmin(dist_a1_to_defs, dim=1)
-    batch_indices = torch.arange(batch_dim, device=device)
-    p_closest_def = def_pos[batch_indices, closest_def_indices]
-    
-    def_to_a1_vec = p_a1 - p_closest_def
-    ideal_screen_pos = p_closest_def + h_params['screen_pos_offset'] * (def_to_a1_vec / (torch.linalg.norm(def_to_a1_vec, dim=-1, keepdim=True) + 1e-6))
-    dist_a2_to_ideal_sq = torch.sum((p_a2 - ideal_screen_pos)**2, dim=-1)
-    vec_a2_to_def = p_closest_def - p_a2
-    vec_a2_to_a1 = p_a1 - p_a2
-    dot_product_gate = torch.sum(vec_a2_to_def * vec_a2_to_a1, dim=-1)
+    # def_pos 的形状是 (B, n_defenders, 2), B是批次数, n_defenders是防守者数量 (这里是2)
 
-    # A2是否比靠近A1更靠近防守者 (spacing_gate_factor)
+    # --- 1. 将A1和A2的位置张量扩展维度，以便与所有防守者进行广播计算 ---
+    # (B, 2) -> (B, 1, 2)
+    p_a1_exp = p_a1.unsqueeze(1)
+    p_a2_exp = p_a2.unsqueeze(1)
+
+    # --- 2. 并行计算A2针对每一个防守者的“理想掩护位置” ---
+    # def_to_a1_vec 包含了A2到每个防守者的向量，形状为 (B, n_defenders, 2)
+    def_to_a1_vec = p_a1_exp - def_pos
+    # ideal_screen_pos 包含了针对每个防守者的理想掩护点，形状为 (B, n_defenders, 2)
+    ideal_screen_pos = def_pos + h_params['screen_pos_offset'] * (def_to_a1_vec / (torch.linalg.norm(def_to_a1_vec, dim=-1, keepdim=True) + 1e-6))
+    
+    # --- 3. 并行计算所有奖励和门控因子 ---
+    # 计算A2到每个理想位置的距离的平方，形状为 (B, n_defenders)
+    dist_a2_to_ideal_sq = torch.sum((p_a2_exp - ideal_screen_pos)**2, dim=-1)
+    
+    # 计算用于门控的辅助向量
+    vec_a2_to_def = def_pos - p_a2_exp
+    vec_a2_to_a1 = p_a1_exp - p_a2_exp
+    
+    # 位置门控：确保A2在A1和防守者之间
+    dot_product_gate = torch.sum(vec_a2_to_def * vec_a2_to_a1, dim=-1)
+    soft_gate_factor = torch.sigmoid(-h_params['k_screen_gate'] * dot_product_gate)
+
+    # 间距门控：确保A2离防守者比离A1更近
     dist_a2_to_a1 = torch.linalg.norm(vec_a2_to_a1, dim=-1)
     dist_a2_to_def = torch.linalg.norm(vec_a2_to_def, dim=-1)
-    # 距离差：如果 > 0，说明离Def更近(好)；如果 < 0，说明离A1更近(坏)
     distance_difference = dist_a2_to_a1 - dist_a2_to_def
     spacing_gate_factor = torch.sigmoid(h_params['screen_spacing_gate_k'] * distance_difference)
 
-    soft_gate_factor = torch.sigmoid(-h_params['k_screen_gate'] * dot_product_gate)
-    screen_reward = h_params['k_ideal_screen_pos'] * torch.exp(-dist_a2_to_ideal_sq / (2 * h_params['screen_pos_sigma']**2)) * soft_gate_factor * spacing_gate_factor
-    
+    # --- 4. 计算针对每个防守者的潜在奖励，并从中选取最大值 ---
+    # 掩护奖励 (Screen Reward)
+    potential_screen_rewards = h_params['k_ideal_screen_pos'] * torch.exp(-dist_a2_to_ideal_sq / (2 * h_params['screen_pos_sigma']**2)) * soft_gate_factor * spacing_gate_factor
+    screen_reward, _ = torch.max(potential_screen_rewards, dim=1) # 取所有可能掩护中的最大收益
+
+    # 干扰奖励 (Interference Reward)
+    dist_a2_to_key_def = torch.linalg.norm(p_a2_exp - def_pos, dim=-1) # 复用此距离计算
+    potential_interference_rewards = h_params['k_a2_interference_reward'] * torch.exp(-dist_a2_to_key_def.pow(2) / (2 * h_params['screen_pos_sigma']**2))
+    interference_reward, _ = torch.max(potential_interference_rewards, dim=1) # 取所有可能干扰中的最大收益
+
+    # 排斥奖励 (Repulsion Reward)
+    def_vel = all_vel[:, n_attackers:]
+    a1_to_def_vec_repel = -def_to_a1_vec # 复用之前计算的向量
+    repulsion_direction = a1_to_def_vec_repel / (torch.linalg.norm(a1_to_def_vec_repel, dim=-1, keepdim=True) + 1e-6)
+    repulsion_speed = torch.sum(def_vel * repulsion_direction, dim=-1)
+    is_a2_responsible = dist_a2_to_key_def < h_params['repulsion_proximity_threshold']
+    potential_repulsion_rewards = h_params['k_repulsion_reward'] * torch.clamp(repulsion_speed, min=0.0) * is_a2_responsible.float()
+    repulsion_reward, _ = torch.max(potential_repulsion_rewards, dim=1) # 取所有可能排斥中的最大收益
+
+    # --- 5. 计算阻挡投篮路线惩罚 (此逻辑与防守者无关，保持不变) ---
     shot_vector_a2 = basket_pos - p_a1
     a2_vector = p_a2 - p_a1
     proj_len_ratio_a2 = torch.sum(a2_vector * shot_vector_a2, dim=-1) / (torch.sum(shot_vector_a2**2, dim=-1) + 1e-6)
@@ -661,16 +712,7 @@ def calculate_rewards_and_dones_jit(
     line_block_factor = is_between_a2.float() * torch.exp(-dist_perp_sq_a2 / (2 * (0.5 * h_params['agent_radius'])**2))
     line_penalty = h_params['k_a2_shot_line_penalty'] * line_block_factor * proximity_factor_a2
     
-    v_closest_def_repel = all_vel[batch_indices, n_attackers + closest_def_indices]
-    a1_to_def_vec_repel = p_closest_def - p_a1
-    repulsion_direction = a1_to_def_vec_repel / (torch.linalg.norm(a1_to_def_vec_repel, dim=-1, keepdim=True) + 1e-6)
-    repulsion_speed = torch.sum(v_closest_def_repel * repulsion_direction, dim=-1)
-    dist_a2_to_closest_def = torch.linalg.norm(p_a2 - p_closest_def, dim=-1)
-    is_a2_responsible = dist_a2_to_closest_def < h_params['repulsion_proximity_threshold']
-    repulsion_reward = h_params['k_repulsion_reward'] * torch.clamp(repulsion_speed, min=0.0) * is_a2_responsible.float()
-    dist_a2_to_key_def = torch.linalg.norm(p_a2 - p_closest_def, dim=-1)
-    # 使用高斯函数，A2离这个关键防守者越近，奖励越高
-    interference_reward = h_params['k_a2_interference_reward'] * torch.exp(-dist_a2_to_key_def.pow(2) / (2 * h_params['screen_pos_sigma']**2))
+    # --- 6. 汇总所有奖励与惩罚项，并应用到A2的稠密奖励上 ---
     dense_reward[:, 1] += screen_reward - line_penalty + repulsion_reward + interference_reward
 
     # 4.3 防守者奖励/惩罚

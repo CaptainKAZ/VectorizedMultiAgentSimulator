@@ -19,7 +19,6 @@ import pyglet
 import six
 import torch
 
-pyglet.options["headless"] = True
 
 from vmas.simulator.utils import TorchUtils, x_to_rgb_colormap
 
