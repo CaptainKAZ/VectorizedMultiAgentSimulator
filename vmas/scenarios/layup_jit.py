@@ -108,9 +108,9 @@ def calculate_rewards_and_dones_jit(
         if losing_shot_indices.numel() > 0:
             reason_code[losing_shot_indices] = 11 # 原因码11: 投篮被盖
         
-        base_score = h_params['max_score'] * (1 - dist_to_spot[shot_b_idx] / h_params['R_spot']) + h_params['shoot_score']
+        base_score = h_params['max_score'] * (1 - dist_to_spot[shot_b_idx] / h_params['R_spot'])
         final_score_modified = base_score * (1 - total_block_factor)
-        time_bonus = h_params['k_time_bonus'] * (t_remaining[shot_b_idx].squeeze(-1) / h_params['t_limit'])
+        time_bonus = h_params['k_time_bonus'] * (t_remaining[shot_b_idx].squeeze(-1) / h_params['t_limit']) * (1 - total_block_factor)
         dist_a1_to_defs = torch.linalg.norm(blocker_vector, dim=-1)
         avg_dist_to_defs = torch.mean(dist_a1_to_defs, dim=1)
         spacing_bonus = h_params['k_spacing_bonus'] * avg_dist_to_defs
@@ -125,7 +125,7 @@ def calculate_rewards_and_dones_jit(
         vel_stillness_bonus = h_params['k_shot_stillness_vel_bonus'] * torch.exp(-a1_speed_shot)
         act_stillness_bonus = h_params['k_shot_stillness_act_bonus'] * torch.exp(-a1_action_norm_shot)
 
-        a1_reward = final_score_modified + spacing_bonus + time_bonus + vel_stillness_bonus + act_stillness_bonus
+        a1_reward = final_score_modified + spacing_bonus + time_bonus + vel_stillness_bonus + act_stillness_bonus + h_params['shoot_score']
 
         terminal_rewards[shot_b_idx, 0] += a1_reward
 
@@ -733,6 +733,14 @@ def calculate_rewards_and_dones_jit(
     soft_gate_factor_def = torch.sigmoid(5.0 * proj_dot_product)
     final_positioning_reward = base_positioning_reward * soft_gate_factor_def * in_defensive_half.float()
 
+    # 计算每个防守者到A1的距离
+    dist_d_to_a1 = torch.linalg.norm(d_to_a1_vec, dim=-1)
+    # 使用 1 - (距离/最大范围) 的形式计算奖励因子，距离越近，因子越接近1
+    # clamp(min=0)确保距离超过最大范围时，奖励为0而不是负数
+    pressure_factor = torch.clamp(1.0 - (dist_d_to_a1 / h_params['def_pressure_range']), min=0.0)
+    # 最终压力奖励 = 系数 * 奖励因子 * 是否在防守半场(避免越界防守) * 是否在A1身前(soft_gate)
+    pressure_reward = h_params['k_def_pressure_reward'] * (pressure_factor ** 2) * in_defensive_half.float() * soft_gate_factor_def
+
     penetration_depth = torch.clamp(a1_pos[:, 1], min=0.0)
     a1_penetration_penalty = -h_params['k_def_a1_penetration_penalty'] * (penetration_depth ** 2)
     
@@ -752,7 +760,7 @@ def calculate_rewards_and_dones_jit(
     def_gaussian_reward = h_params['k_def_gaussian_spot'] * torch.exp(- (dist_d_to_spot_all**2) / (2 * h_params['def_gaussian_spot_sigma']**2))
     def_gaussian_reward *= in_defensive_half.float()
     
-    total_def_reward = overextend_penalty + final_positioning_reward + final_spot_control_reward + def_gaussian_reward + a1_penetration_penalty.unsqueeze(1)
+    total_def_reward = overextend_penalty + final_positioning_reward + final_spot_control_reward + def_gaussian_reward + a1_penetration_penalty.unsqueeze(1)+pressure_reward
     dense_reward[:, n_attackers:] += total_def_reward
 
     # --- 5. 时间紧迫性惩罚/奖励 ---
