@@ -91,8 +91,8 @@ class Scenario(BaseScenario):
         self.v_max = kwargs.get("v_max", 5.0)
         
         # ========== 2. 终止条件阈值 (Termination Thresholds) ==========
-        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.3)
-        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.8)
+        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.15)
+        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.4)
         self.h_params["v_foul_threshold"] = kwargs.get("v_foul_threshold", 0.6)
         self.h_params["shot_still_frames"] = kwargs.get("shot_still_frames", 5)
 
@@ -107,9 +107,9 @@ class Scenario(BaseScenario):
         self.h_params["k_a1_ready_to_shoot_reward"] = kwargs.get("k_a1_ready_to_shoot_reward", 50.0)
         self.h_params["k_a1_velocity_stillness_reward"] = kwargs.get("k_a1_velocity_stillness_reward", 10.0)
         self.h_params["velocity_stillness_sigma"] = kwargs.get("velocity_stillness_sigma", 0.4)
-        self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 50)
-        self.h_params["action_stillness_sigma"] = kwargs.get("action_stillness_sigma", 0.4)
-        self.h_params["block_gate_k"] = kwargs.get("block_gate_k", 10.0)
+        self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 60)
+        self.h_params["action_stillness_sigma"] = kwargs.get("action_stillness_sigma", 0.3)
+        self.h_params["block_gate_k"] = kwargs.get("block_gate_k", 30.0)
         self.h_params['k_a1_separation_reward'] = kwargs.get("k_a1_separation_reward", 40.0)
         self.h_params["k_a1_blocked_penalty"] = kwargs.get("k_a1_blocked_penalty", -70.0)
         self.h_params["k_a1_tangential_reward"] = kwargs.get("k_a1_tangential_reward", 60.0)
@@ -125,7 +125,7 @@ class Scenario(BaseScenario):
         self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 30.0)
         self.h_params["k_repulsion_reward"] = kwargs.get("k_repulsion_reward", 30.0)
         self.h_params["repulsion_proximity_threshold"] = kwargs.get("repulsion_proximity_threshold", self.h_params["R_spot"])
-        self.h_params["k_a2_shot_line_penalty"] = kwargs.get("k_a2_shot_line_penalty", 10)
+        self.h_params["k_a2_shot_line_penalty"] = kwargs.get("k_a2_shot_line_penalty", 20)
         self.h_params["screen_pos_offset"] = kwargs.get("screen_pos_offset", self.h_params["agent_radius"] * 3)
         self.h_params["screen_pos_sigma"] = kwargs.get("screen_pos_sigma", self.h_params["R_spot"])
         self.h_params["k_screen_gate"] = kwargs.get("k_screen_gate", 7.0)
@@ -134,15 +134,15 @@ class Scenario(BaseScenario):
         self.h_params["time_penalty_grace_period"] = kwargs.get("time_penalty_grace_period", 8)
         self.h_params["k_attacker_time_penalty"] = kwargs.get("k_attacker_time_penalty", 2)
         self.h_params["k_defender_time_bonus"] = kwargs.get("k_defender_time_bonus", 1.0)
-        self.h_params["k_positioning"] = kwargs.get("k_positioning", 70.0)
-        self.h_params["k_def_a1_penetration_penalty"] = kwargs.get("k_def_a1_penetration_penalty", 1.0)
-        self.h_params["k_spot_control_reward"] = kwargs.get("k_spot_control_reward", 3.0) # 奖励系数，用于奖励成功迫使A1远离投篮点的防守行为
-        self.h_params["def_guard_threshold"] = kwargs.get("def_guard_threshold", self.h_params["agent_radius"] * 8.0) # 盯防判定距离
+        self.h_params["k_positioning"] = kwargs.get("k_positioning", 60.0)
+        self.h_params["k_def_a1_penetration_penalty"] = kwargs.get("k_def_a1_penetration_penalty", 5.0)
+        self.h_params["k_spot_control_reward"] = kwargs.get("k_spot_control_reward", 10.0) # 奖励系数，用于奖励成功迫使A1远离投篮点的防守行为
+        self.h_params["def_guard_threshold"] = kwargs.get("def_guard_threshold", self.h_params["agent_radius"] * 6.0) # 盯防判定距离
         self.h_params["k_overextend_penalty"] = kwargs.get("k_overextend_penalty", 240.0)
-        self.h_params["k_def_gaussian_spot"] = kwargs.get("k_def_gaussian_spot", 60)
-        self.h_params["def_gaussian_spot_sigma"] = kwargs.get("def_gaussian_spot_sigma", 1.2 * self.h_params["R_spot"])
+        self.h_params["k_def_gaussian_spot"] = kwargs.get("k_def_gaussian_spot", 30)
+        self.h_params["def_gaussian_spot_sigma"] = kwargs.get("def_gaussian_spot_sigma", 1.0 * self.h_params["R_spot"])
         self.h_params["def_pos_offset"] = kwargs.get("def_pos_offset", self.h_params["agent_radius"] * 2.5)
-        self.h_params["def_pos_sigma"] = kwargs.get("def_pos_sigma", 0.5)
+        self.h_params["def_pos_sigma"] = kwargs.get("def_pos_sigma", self.h_params["agent_radius"])
         self.h_params["oob_penalty"] = kwargs.get("oob_penalty", -3000.0)
         self.h_params["oob_margin"] = kwargs.get("oob_margin", 0.05)
         self.h_params["k_coll_active"] = kwargs.get("k_coll_active", 5.0)
@@ -183,9 +183,9 @@ class Scenario(BaseScenario):
         self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 150.0)
         self.h_params["attacker_timeout_base_reward_out_spot"] = kwargs.get("attacker_timeout_base_reward_out_spot", -100.0)
         self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", -100.0)
-        self.h_params["defender_timeout_reward"] = kwargs.get("defender_timeout_reward", 1000.0)
-        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 1500.0)
-        self.h_params["k_def_force_reward"] = kwargs.get("k_def_force_reward", 600.0)
+        self.h_params["defender_timeout_reward"] = kwargs.get("defender_timeout_reward", 9000.0)
+        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 3000.0)
+        self.h_params["k_def_force_reward"] = kwargs.get("k_def_force_reward", 2000.0)
         self.h_params["k_def_pos_reward"] = kwargs.get("k_def_pos_reward", 100.0)
         self.h_params["k_def_area_reward"] = kwargs.get("k_def_area_reward", 150.0)
         self.h_params["k_def_shot_penalty"] = kwargs.get("k_def_shot_penalty", 300.0)
@@ -196,8 +196,8 @@ class Scenario(BaseScenario):
         
         # ========== 5. 其他行为控制参数 (Other Behavior Control) ==========
         self.start_delay_frames = kwargs.get("start_delay_frames", 10)
-        self.h_params["def_proximity_threshold"] = kwargs.get("def_proximity_threshold", 1.2)
-        self.h_params["block_sigma"] = kwargs.get("block_sigma", self.h_params["agent_radius"] * 1.5)
+        self.h_params["def_proximity_threshold"] = kwargs.get("def_proximity_threshold", 2.5*self.h_params["agent_radius"])
+        self.h_params["block_sigma"] = kwargs.get("block_sigma", 0.2)
         
         # ----------------- 环境构建 (World Setup) -----------------
         self.max_steps = int(self.h_params["t_limit"] / self.dt)
@@ -217,7 +217,7 @@ class Scenario(BaseScenario):
                 collide=True,
                 movable=True,
                 rotatable=False,
-                u_range=self.v_max if is_attacker else 3,
+                u_range=self.v_max,
                 drag=0.01,
                 shape=Sphere(radius=self.h_params["agent_radius"]),
                 dynamics=Holonomic(),
