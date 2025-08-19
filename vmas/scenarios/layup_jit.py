@@ -526,7 +526,7 @@ def calculate_rewards_and_dones_jit(
     blocked_penalty = total_block_factor_a1 * h_params['k_a1_blocked_penalty']
     
     # 犹豫惩罚: 在非投篮区移动过慢时受罚
-    hesitation_factor = torch.clamp(1.0 - (a1_speed / h_params['hesitate_speed_threshold']), min=0.0)**2
+    hesitation_factor = torch.clamp(1.0 - (a1_speed / h_params['hesitate_speed_threshold']), min=0.0)
     hesitation_penalty = -h_params['k_hesitation_penalty'] * hesitation_factor * (~is_in_spot_a1).float()
 
     # 动态行为奖励: 根据被封盖程度，在“静止得分”和“移动摆脱”两种策略间动态切换
@@ -534,7 +534,8 @@ def calculate_rewards_and_dones_jit(
     raw_a1_u_norm = torch.linalg.vector_norm(raw_actions[:, 0, :], dim=-1)
     vel_still_reward = h_params['k_a1_velocity_stillness_reward'] * torch.exp(-(a1_speed**2) / (2 * h_params['velocity_stillness_sigma']**2))
     act_still_reward = h_params['k_a1_action_stillness_reward'] * torch.exp(-(raw_a1_u_norm**2) / (2 * h_params['action_stillness_sigma']**2))
-    stillness_reward = (vel_still_reward + act_still_reward * (raw_a1_u_norm < h_params['low_u_threshold']).float()) * is_in_spot_a1.float()
+    brake_reward = h_params['k_a1_brake_in_spot_reward'] * is_braking[:, 0].float()
+    stillness_reward = (brake_reward + vel_still_reward + act_still_reward * (raw_a1_u_norm < h_params['low_u_threshold']).float()) * is_in_spot_a1.float()
     
     # b. 摆脱奖励 (被封锁时，鼓励向远离最近防守者的方向移动)
     dist_to_closest_def, closest_def_indices = torch.min(dist_a1_to_defs, dim=1)

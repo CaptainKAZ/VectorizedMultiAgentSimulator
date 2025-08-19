@@ -104,7 +104,7 @@ class Scenario(BaseScenario):
         # =================================================================================
         # --- 2.1 投篮判定 ---
         self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.15) # 触发投篮所允许的最大速度
-        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 2)  # 触发投篮所允许的最大动作指令模长
+        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.6)  # 触发投篮所允许的最大动作指令模长
         self.h_params["shot_still_frames"] = kwargs.get("shot_still_frames", 5)   # 触发投篮需要在投篮区内保持静止的帧数
 
         # --- 2.2 犯规判定 ---
@@ -131,12 +131,12 @@ class Scenario(BaseScenario):
 
         # --- 3.2 进攻超时 ---
         self.h_params["defender_timeout_reward"] = kwargs.get("defender_timeout_reward", 9000.0) # 进攻超时，防守方获得的奖励
-        self.h_params["attacker_timeout_reward_max"] = kwargs.get("attacker_timeout_reward_max", 3000) # 进攻超时，进攻方惩罚/奖励的绝对值上限
-        self.h_params["k_timeout_move_vel_penalty"] = kwargs.get("k_timeout_move_vel_penalty", 400.0) # 超时瞬间，A1因速度过大受到的惩罚系数
-        self.h_params["k_timeout_move_act_penalty"] = kwargs.get("k_timeout_move_act_penalty", 400.0) # 超时瞬间，A1因动作指令过大受到的惩罚系数
-        self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 150.0) # 超时瞬间，A1在圈外时，根据距离远近受到的惩罚系数
+        self.h_params["attacker_timeout_reward_max"] = kwargs.get("attacker_timeout_reward_max", 2000) # 进攻超时，进攻方惩罚/奖励的绝对值上限
+        self.h_params["k_timeout_move_vel_penalty"] = kwargs.get("k_timeout_move_vel_penalty", 200.0) # 超时瞬间，A1因速度过大受到的惩罚系数
+        self.h_params["k_timeout_move_act_penalty"] = kwargs.get("k_timeout_move_act_penalty", 200.0) # 超时瞬间，A1因动作指令过大受到的惩罚系数
+        self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 100.0) # 超时瞬间，A1在圈外时，根据距离远近受到的惩罚系数
         self.h_params["attacker_timeout_base_reward_out_spot"] = kwargs.get("attacker_timeout_base_reward_out_spot", -100.0) # 超时瞬间，A1在圈外的基础惩罚
-        self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", -100.0)    # 超时瞬间，A1在圈内的基础奖励/惩罚
+        self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", 100.0)    # 超时瞬间，A1在圈内的基础奖励/惩罚
 
         # --- 3.3 犯规 ---
         self.h_params["R_foul"] = kwargs.get("R_foul", 4000.0) # 碰撞犯规的基础奖励/惩罚值
@@ -164,7 +164,7 @@ class Scenario(BaseScenario):
         self.h_params["k_u_penalty_general"] = kwargs.get("k_u_penalty_general", 0.1) # 动作指令大小的基础惩罚系数
         self.h_params["k_action_access_max_penalty"] = kwargs.get("k_action_access_max_penalty", 20) # 动作指令超过阈值时的额外惩罚系数
         self.h_params["k_action_access_max_threshold"] = kwargs.get("k_action_access_max_threshold", 0.95) # 触发额外动作惩罚的阈值（v_max的百分比）
-        self.h_params["k_brake_usage_penalty"] = kwargs.get("k_brake_usage_penalty", 2) # 使用刹车的惩罚系数
+        self.h_params["k_brake_usage_penalty"] = kwargs.get("k_brake_usage_penalty", 0.1) # 使用刹车的惩罚系数
         self.h_params["k_conflicting_action_penalty"] = kwargs.get("k_conflicting_action_penalty", 10) # 同时输出方向和刹车指令的矛盾惩罚系数
         self.h_params["k_excess_acceleration_penalty"] = kwargs.get("k_excess_acceleration_penalty", 0.01) # 请求加速度超过物理极限的惩罚系数
         self.h_params["k_action_jerk_penalty"] = kwargs.get("k_action_jerk_penalty", 0.01) # 动作指令变化率（Jerk）的惩罚系数，鼓励平滑动作
@@ -188,6 +188,7 @@ class Scenario(BaseScenario):
         self.h_params["k_a1_velocity_stillness_reward"] = kwargs.get("k_a1_velocity_stillness_reward", 10.0) # 在投篮区内，A1速度越慢奖励越高的系数
         self.h_params["velocity_stillness_sigma"] = kwargs.get("velocity_stillness_sigma", 0.4) # 速度静止奖励高斯函数的标准差
         self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 10) # 在投篮区内，A1动作指令越小奖励越高的系数
+        self.h_params["k_a1_brake_in_spot_reward"] = kwargs.get("k_a1_brake_in_spot_reward", 20) # 在投篮区内，A1刹车奖励
         self.h_params["action_stillness_sigma"] = kwargs.get("action_stillness_sigma", 0.3) # 动作静止奖励高斯函数的标准差
         self.h_params["low_u_threshold"] = kwargs.get("low_u_threshold", 0.9) # 判定A1有“停止意图”的动作指令模长阈值
         self.h_params["k_a1_separation_reward"] = kwargs.get("k_a1_separation_reward", 60.0) # A1被封锁时，奖励其向远离防守者的方向移动
