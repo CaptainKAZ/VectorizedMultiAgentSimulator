@@ -104,7 +104,7 @@ class Scenario(BaseScenario):
         # =================================================================================
         # --- 2.1 投篮判定 ---
         self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.15) # 触发投篮所允许的最大速度
-        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.4)  # 触发投篮所允许的最大动作指令模长
+        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 2)  # 触发投篮所允许的最大动作指令模长
         self.h_params["shot_still_frames"] = kwargs.get("shot_still_frames", 5)   # 触发投篮需要在投篮区内保持静止的帧数
 
         # --- 2.2 犯规判定 ---
@@ -164,19 +164,19 @@ class Scenario(BaseScenario):
         self.h_params["k_u_penalty_general"] = kwargs.get("k_u_penalty_general", 0.1) # 动作指令大小的基础惩罚系数
         self.h_params["k_action_access_max_penalty"] = kwargs.get("k_action_access_max_penalty", 20) # 动作指令超过阈值时的额外惩罚系数
         self.h_params["k_action_access_max_threshold"] = kwargs.get("k_action_access_max_threshold", 0.95) # 触发额外动作惩罚的阈值（v_max的百分比）
-        self.h_params["k_brake_usage_penalty"] = kwargs.get("k_brake_usage_penalty", 1) # 使用刹车的惩罚系数
-        self.h_params["k_conflicting_action_penalty"] = kwargs.get("k_conflicting_action_penalty", 5) # 同时输出方向和刹车指令的矛盾惩罚系数
-        self.h_params["k_excess_acceleration_penalty"] = kwargs.get("k_excess_acceleration_penalty", 0.005) # 请求加速度超过物理极限的惩罚系数
-        self.h_params["k_action_jerk_penalty"] = kwargs.get("k_action_jerk_penalty", 0.1) # 动作指令变化率（Jerk）的惩罚系数，鼓励平滑动作
+        self.h_params["k_brake_usage_penalty"] = kwargs.get("k_brake_usage_penalty", 2) # 使用刹车的惩罚系数
+        self.h_params["k_conflicting_action_penalty"] = kwargs.get("k_conflicting_action_penalty", 10) # 同时输出方向和刹车指令的矛盾惩罚系数
+        self.h_params["k_excess_acceleration_penalty"] = kwargs.get("k_excess_acceleration_penalty", 0.01) # 请求加速度超过物理极限的惩罚系数
+        self.h_params["k_action_jerk_penalty"] = kwargs.get("k_action_jerk_penalty", 0.01) # 动作指令变化率（Jerk）的惩罚系数，鼓励平滑动作
         self.h_params["k_coll_active"] = kwargs.get("k_coll_active", 5.0) # 作为主动碰撞方受到的惩罚系数
         self.h_params["k_coll_passive"] = kwargs.get("k_coll_passive", 0.1) # 作为被动碰撞方受到的惩罚系数
-        self.h_params["proximity_threshold"] = kwargs.get("proximity_threshold", self.h_params["agent_radius"] * 2.5) # 智能体间的安全距离，小于此距离将触发近距离惩罚
+        self.h_params["proximity_threshold"] = kwargs.get("proximity_threshold", self.h_params["agent_radius"] * 2.3) # 智能体间的安全距离，小于此距离将触发近距离惩罚
         self.h_params["proximity_penalty_margin"] = kwargs.get("proximity_penalty_margin", 0.10) # 近距离惩罚的平滑边界宽度
-        self.h_params["k_proximity_penalty"] = kwargs.get("k_proximity_penalty", 90.0) # 通用近距离惩罚系数
+        self.h_params["k_proximity_penalty"] = kwargs.get("k_proximity_penalty", 40.0) # 通用近距离惩罚系数
         self.h_params["low_velocity_threshold"] = kwargs.get("low_velocity_threshold", self.h_params['v_foul_threshold']) # 区分高速碰撞和低速推挤的阈值
         self.h_params["k_push_penalty"] = kwargs.get("k_push_penalty", 60.0) # 进攻方在低速碰撞中推挤对方的惩罚系数
         self.h_params["stand_still_threshold"] = kwargs.get("stand_still_threshold", self.h_params['v_foul_threshold']) # 判定为“站定”状态的最大速度
-        self.h_params["k_stand_still_reward"] = kwargs.get("k_stand_still_reward", 5.0) # 站定不动时，对正在冲过来的对手“造犯规”的奖励系数
+        self.h_params["k_stand_still_reward"] = kwargs.get("k_stand_still_reward", 10.0) # 站定不动时，对正在冲过来的对手“造犯规”的奖励系数
         self.h_params["charge_drawing_range"] = kwargs.get("charge_drawing_range", self.h_params["agent_radius"] * 6.0) # “造犯规”的有效距离
 
         # --- 4.2 进攻方 - A1 (持球人) ---
@@ -187,25 +187,25 @@ class Scenario(BaseScenario):
         self.h_params["k_a1_ready_to_shoot_reward"] = kwargs.get("k_a1_ready_to_shoot_reward", 50.0) # A1处于“准备投篮”状态时的奖励系数
         self.h_params["k_a1_velocity_stillness_reward"] = kwargs.get("k_a1_velocity_stillness_reward", 10.0) # 在投篮区内，A1速度越慢奖励越高的系数
         self.h_params["velocity_stillness_sigma"] = kwargs.get("velocity_stillness_sigma", 0.4) # 速度静止奖励高斯函数的标准差
-        self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 60) # 在投篮区内，A1动作指令越小奖励越高的系数
+        self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 10) # 在投篮区内，A1动作指令越小奖励越高的系数
         self.h_params["action_stillness_sigma"] = kwargs.get("action_stillness_sigma", 0.3) # 动作静止奖励高斯函数的标准差
         self.h_params["low_u_threshold"] = kwargs.get("low_u_threshold", 0.9) # 判定A1有“停止意图”的动作指令模长阈值
-        self.h_params["k_a1_separation_reward"] = kwargs.get("k_a1_separation_reward", 40.0) # A1被封锁时，奖励其向远离防守者的方向移动
-        self.h_params["k_a1_tangential_reward"] = kwargs.get("k_a1_tangential_reward", 90.0) # A1在受压迫时，奖励其横向移动以摆脱防守
-        self.h_params["a1_tangential_pressure_sigma"] = kwargs.get("a1_tangential_pressure_sigma", 2) # 计算横向移动奖励时，防守压力距离衰减的标准差
+        self.h_params["k_a1_separation_reward"] = kwargs.get("k_a1_separation_reward", 60.0) # A1被封锁时，奖励其向远离防守者的方向移动
+        self.h_params["k_a1_tangential_reward"] = kwargs.get("k_a1_tangential_reward", 120.0) # A1在受压迫时，奖励其横向移动以摆脱防守
+        self.h_params["a1_tangential_pressure_sigma"] = kwargs.get("a1_tangential_pressure_sigma", self.h_params["agent_radius"] * 6) # 计算横向移动奖励时，防守压力距离衰减的标准差
         self.h_params["k_a1_blocked_penalty"] = kwargs.get("k_a1_blocked_penalty", -70.0) # A1投篮路线被封锁时的惩罚系数
         self.h_params["hesitate_speed_threshold"] = kwargs.get("hesitate_speed_threshold", 1.5) # 在非投篮区，低于此速度被认为是“犹豫”，将受惩罚
-        self.h_params["k_hesitation_penalty"] = kwargs.get("k_hesitation_penalty", 30) # A1犹豫不决的惩罚系数
+        self.h_params["k_hesitation_penalty"] = kwargs.get("k_hesitation_penalty", 40) # A1犹豫不决的惩罚系数
         self.h_params["a1_proximity_threshold"] = kwargs.get("a1_proximity_threshold", self.h_params["agent_radius"] * 2.5) # 专门为A1设定的近距离惩罚触发距离
         self.h_params["a1_proximity_penalty_margin"] = kwargs.get("a1_proximity_penalty_margin", 0.01) # A1近距离惩罚的平滑边界宽度
         self.h_params["k_a1_proximity_penalty"] = kwargs.get("k_a1_proximity_penalty", 60) # A1的近距离惩罚系数
 
         # --- 4.3 进攻方 - A2 (无球人) ---
-        self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 30.0) # A2移动到最佳掩护位置的奖励系数
+        self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 60.0) # A2移动到最佳掩护位置的奖励系数
         self.h_params["k_a2_interference_reward"] = kwargs.get("k_a2_interference_reward", 40.0) # A2靠近并干扰防守者的奖励系数
-        self.h_params["k_repulsion_reward"] = kwargs.get("k_repulsion_reward", 30.0) # A2迫使防守者远离A1的“排斥”奖励系数
+        self.h_params["k_repulsion_reward"] = kwargs.get("k_repulsion_reward", 60.0) # A2迫使防守者远离A1的“排斥”奖励系数
         self.h_params["repulsion_proximity_threshold"] = kwargs.get("repulsion_proximity_threshold", self.h_params["R_spot"]) # 触发排斥奖励时，A2需要离防守者足够近的距离
-        self.h_params["k_a2_shot_line_penalty"] = kwargs.get("k_a2_shot_line_penalty", 20) # A2阻挡A1投篮路线的惩罚系数
+        self.h_params["k_a2_shot_line_penalty"] = kwargs.get("k_a2_shot_line_penalty", 30) # A2阻挡A1投篮路线的惩罚系数
         self.h_params["screen_pos_offset"] = kwargs.get("screen_pos_offset", self.h_params["agent_radius"] * 3) # 定义“理想掩护位置”在防守者身后的距离
         self.h_params["screen_pos_sigma"] = kwargs.get("screen_pos_sigma", self.h_params["R_spot"]) # 掩护位置奖励高斯函数的标准差
         self.h_params["k_screen_gate"] = kwargs.get("k_screen_gate", 7.0) # A2掩护位置门控的Sigmoid函数斜率，判断A2是否在A1和防守者之间
@@ -223,7 +223,7 @@ class Scenario(BaseScenario):
         self.h_params["def_gaussian_spot_sigma"] = kwargs.get("def_gaussian_spot_sigma", 1.0 * self.h_params["R_spot"]) # 防守方高斯奖励的宽度
         self.h_params["k_def_a1_penetration_penalty"] = kwargs.get("k_def_a1_penetration_penalty", 5.0) # A1突破深入时，防守方受到的惩罚系数
         self.h_params["k_overextend_penalty"] = kwargs.get("k_overextend_penalty", 240.0) # 防守方越过中线太远的惩罚系数
-        self.h_params["k_def_proximity_penalty"] = kwargs.get("k_def_proximity_penalty", 90.0) # 防守方的近距离惩罚系数
+        self.h_params["k_def_proximity_penalty"] = kwargs.get("k_def_proximity_penalty", 40.0) # 防守方的近距离惩罚系数
         self.h_params["proximity_penalty_reduction_in_spot"] = kwargs.get("proximity_penalty_reduction_in_spot", 0.2) # 在投篮区内，对防守方近距离惩罚的减免比例
         self.h_params["k_def_push_penalty"] = kwargs.get("k_def_push_penalty", 60.0) # 防守方在低速碰撞中推挤对方的惩罚系数
 
@@ -234,7 +234,7 @@ class Scenario(BaseScenario):
 
         # --- 4.6 封盖相关参数 ---
         self.h_params["def_proximity_threshold"] = kwargs.get("def_proximity_threshold", 2.5*self.h_params["agent_radius"]) # 计算封盖时，判断防守者是否离A1足够近的距离阈值
-        self.h_params["block_sigma"] = kwargs.get("block_sigma", 0.2) # 封盖因子高斯函数的标准差，影响封盖判定的严格程度
+        self.h_params["block_sigma"] = kwargs.get("block_sigma", 0.25) # 封盖因子高斯函数的标准差，影响封盖判定的严格程度
         self.h_params["block_gate_k"] = kwargs.get("block_gate_k", 30.0) # 封盖软门控Sigmoid函数的斜率
         
         # ----------------- 环境构建 (World Setup) -----------------
