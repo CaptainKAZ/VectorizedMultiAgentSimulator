@@ -63,6 +63,7 @@ def calculate_rewards_and_dones_jit(
     a1_vel = all_vel[:, 0]
     a2_pos = all_pos[:, 1]
     defender_pos = all_pos[:, n_attackers:]
+    is_braking = raw_breaks > 0
 
     # =================================================================================
     # 1. 回合终止条件检查 (Terminal Conditions)
@@ -74,9 +75,8 @@ def calculate_rewards_and_dones_jit(
     # 判断A1是否满足“准备投篮”的状态：在区域内、速度足够慢、没有加速意图、而且正在踩刹车
     in_area = (dist_a1_to_spot <= h_params['R_spot']) & (a1_pos[:, 1] > 0)
     is_still = torch.linalg.norm(a1_vel, dim=1) < h_params['v_shot_threshold']
-    not_accelerating = torch.linalg.norm(raw_actions[:, 0, :], dim=1) < h_params['a_shot_threshold']
-    a1_breaking = raw_breaks[:, 0] > 0
-    is_ready_to_shoot = in_area & is_still & not_accelerating & a1_breaking
+    not_accelerating = (torch.linalg.norm(raw_actions[:, 0, :], dim=1) < h_params['a_shot_threshold']) | is_braking[:, 0]
+    is_ready_to_shoot = in_area & is_still & not_accelerating
     
     # 更新A1静止计数器，如果满足准备条件则+1，否则清零
     prev_still_counter = a1_still_frames_counter
@@ -405,7 +405,6 @@ def calculate_rewards_and_dones_jit(
     dense_reward -= action_limit_penalty
 
     # 2.2.3 刹车使用惩罚 (Brake Usage Penalty)
-    is_braking = raw_breaks > 0
     excess_brake_magnitude = torch.clamp(raw_breaks - penalty_threshold, min=0.0)
     braking_limit_panlty = h_params['k_action_access_max_penalty'] * (excess_brake_magnitude / (penalty_range + 1e-6))
     dense_reward -= (h_params["k_brake_usage_penalty"] * is_braking.float() + braking_limit_panlty)
@@ -471,13 +470,13 @@ def calculate_rewards_and_dones_jit(
             pos_diffs_norm = torch.linalg.norm(pos_rel, dim=-1, keepdim=True) + 1e-6
             proj_vector = -pos_rel / pos_diffs_norm
             push_force_magnitude = torch.einsum('bnd,bnmd->bnm', raw_actions, proj_vector)
-            push_penalty = -push_penalty_coeff.unsqueeze(-1) * torch.clamp(push_force_magnitude, min=0.0)
+            push_penalty = -push_penalty_coeff.unsqueeze(-1) * torch.clamp(push_force_magnitude, min=0.0) * (~is_braking).unsqueeze(-1).float()
             dense_reward += (push_penalty * is_low_speed_collision.float()).sum(dim=-1)
     
     # 2.3.3 造犯规奖励 (Charge Drawing Reward)
     # 奖励站定不动的智能体，如果对手正高速向它冲来
     is_standing_still = torch.linalg.norm(all_vel, dim=-1) < h_params['stand_still_threshold']
-    is_to_stand = raw_u_norm < h_params['stand_still_threshold']
+    is_to_stand = (raw_u_norm < h_params['stand_still_threshold']) | is_braking
     relative_pos_all = all_pos.unsqueeze(2) - all_pos.unsqueeze(1)
     relative_dist_all = torch.linalg.norm(relative_pos_all, dim=-1)
     is_within_charge_range = relative_dist_all < h_params['charge_drawing_range']
