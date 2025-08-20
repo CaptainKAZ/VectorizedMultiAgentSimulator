@@ -669,12 +669,12 @@ class Scenario(BaseScenario):
         # --- 2. 对每个实体独立填充到4维 ---
         # F.pad(tensor, (左填充, 右填充))
         if is_attacker:
-            spot_padded = torch.nn.functional.pad(spot_rel_pos, (0, 2))
+            spot_padded = spot_rel_pos
         else:
-            spot_padded = torch.zeros_like(self_obs) # 防守方不知道投篮点，用全0填充
+            spot_padded = torch.zeros_like(spot_rel_pos) # 防守方不知道投篮点，用全0填充
 
-        basket_padded = torch.nn.functional.pad(basket_rel_pos, (0, 2))
-        time_padded = torch.nn.functional.pad(time_obs, (0, 3))
+        basket_padded = basket_rel_pos
+        time_padded = time_obs
 
         # --- 3. 将所有维度统一的实体拼接成一个扁平的28维向量 ---
         # 7个实体 * 每个4维 = 28维
