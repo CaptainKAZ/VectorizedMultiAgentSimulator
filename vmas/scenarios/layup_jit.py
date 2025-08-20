@@ -416,7 +416,7 @@ def calculate_rewards_and_dones_jit(
     # 2.2.5 超出动力学极限惩罚 (Excess Acceleration Penalty)，刹车时豁免
     requested_a_norm = torch.linalg.norm(requested_accelerations_tensor, dim=-1)
     excess_acceleration = torch.clamp(requested_a_norm - h_params['a_max'], min=0.0)
-    acceleration_penalty = -h_params['k_excess_acceleration_penalty'] * (excess_acceleration ** 2)
+    acceleration_penalty = -h_params['k_excess_acceleration_penalty'] * (excess_acceleration)
     dense_reward += torch.where(is_braking, 0.0, acceleration_penalty)
 
     # 2.2.6 动作平滑度惩罚 (Jerk Penalty)

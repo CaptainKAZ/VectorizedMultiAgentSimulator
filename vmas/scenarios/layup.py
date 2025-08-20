@@ -585,6 +585,43 @@ class Scenario(BaseScenario):
     def done(self):
         # 直接返回在pre_step中由JIT函数计算好的dones标志
         return self.dones
+    
+    def get_global_state(self):
+        """
+        获取环境的全局状态，用于中心化的 Critic 训练。
+        返回一个包含所有智能体和关键实体状态的扁平化张量。
+        
+        返回:
+            torch.Tensor: 全局状态张量，形状为 [B, D]，
+                          其中 B 是批次数, D 是全局状态的总维度。
+        """
+        # 1. 获取所有智能体的位置和速度
+        # all_pos/all_vel 的形状为 [B, N, 2], N=4
+        all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)
+        all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
+
+        # 2. 将位置和速度张量扁平化
+        # [B, N, 2] -> [B, N * 2]
+        batch_dim = self.world.batch_dim
+        flat_pos = all_pos.view(batch_dim, -1)
+        flat_vel = all_vel.view(batch_dim, -1)
+
+        # 3. 获取其他关键状态信息
+        spot_pos = self.spot_center.state.pos      # 形状: [B, 2]
+        basket_pos = self.basket.state.pos        # 形状: [B, 2]
+        time_obs = self.t_remaining / self.h_params["t_limit"] # 形状: [B, 1]
+
+        # 4. 将所有信息沿最后一个维度拼接起来
+        global_state = torch.cat([
+            flat_pos,
+            flat_vel,
+            spot_pos,
+            basket_pos,
+            time_obs,
+        ], dim=-1)
+
+        return global_state
+        
 
     def reward(self, agent: Agent):
         agent_idx = self.world.agents.index(agent)
