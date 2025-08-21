@@ -613,11 +613,23 @@ def calculate_rewards_and_dones_jit(
     overextend_penalty = -h_params['k_overextend_penalty'] * torch.clamp(-defender_pos[..., 1], min=0.0)
     in_defensive_half = defender_pos[..., 1] >= 0
     
-    # 理想站位奖励: 站在A1和篮筐之间
-    ideal_pos = a1_pos.unsqueeze(1) + h_params['def_pos_offset'] * unit_vec_a1_to_basket.unsqueeze(1)
+    # 当 A1 越过中线，理想位置在 A1 和篮筐的连线上，即“人球篮”三点一线
+    ideal_pos_cross = a1_pos.unsqueeze(1) + h_params['def_pos_offset'] * unit_vec_a1_to_basket.unsqueeze(1)
+    # 当 A1 未越过中线，理想位置变为在 A1 的 x 坐标上进行“对位防守”，同时保持防守方自己的 y 坐标，防止被轻易带出防守位置
+    #    - 新的理想位置 x 坐标 = A1 的 x 坐标
+    #    - 新的理想位置 y 坐标 = 防守方当前的 y 坐标
+    n_defenders = defender_pos.shape[1]
+    ideal_pos_x_init = a1_pos[:, 0:1].unsqueeze(1).expand(-1, n_defenders, -1)
+    ideal_pos_y_init = torch.full_like(ideal_pos_x_init, h_params['agent_radius'])
+    ideal_pos_init = torch.cat([ideal_pos_x_init, ideal_pos_y_init], dim=-1)
+    # 定义条件：A1是否未越过中线
+    a1_cross_midline = (a1_pos[:, 1] <= 0).view(batch_dim, 1, 1)
+    # 选择最终的理想防守位置
+    ideal_pos = torch.where(a1_cross_midline, ideal_pos_init, ideal_pos_cross)
     dist_to_ideal = torch.linalg.norm(defender_pos - ideal_pos, dim=-1)
     base_pos_reward = h_params['k_positioning'] * torch.exp(-dist_to_ideal.pow(2) / (2 * h_params['def_pos_sigma']**2))
-    soft_gate_def = torch.sigmoid(5.0 * torch.sum(vec_a1_to_defs * unit_vec_a1_to_basket.unsqueeze(1), dim=-1))
+    soft_gate_def_orig = torch.sigmoid(5.0 * torch.sum(vec_a1_to_defs * unit_vec_a1_to_basket.unsqueeze(1), dim=-1))
+    soft_gate_def = torch.where(a1_cross_midline.squeeze(-1), 1.0, soft_gate_def_orig)
     positioning_reward = base_pos_reward * soft_gate_def * in_defensive_half.float()
 
     # 压迫奖励: 靠近A1施加压力
