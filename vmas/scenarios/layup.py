@@ -140,8 +140,8 @@ class Scenario(BaseScenario):
 
         # --- 3.3 犯规 ---
         self.h_params["R_foul"] = kwargs.get("R_foul", 4000.0) # 碰撞犯规的基础奖励/惩罚值
-        self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 100.0) # 碰撞犯规时，根据相对速度大小调整惩罚的系数
-        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.05) # 犯规发生时，被犯规方队友获得的奖励比例
+        self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 1000.0) # 碰撞犯规时，根据相对速度大小调整惩罚的系数
+        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.5) # 犯规发生时，被犯规方队友获得的奖励比例
         self.h_params["R_wall_collision_penalty"] = kwargs.get("R_wall_collision_penalty", -11000.0) # 因持续撞墙导致回合结束的惩罚
         self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 10000.0) # 防守方因持续越线导致回合结束的惩罚
 
