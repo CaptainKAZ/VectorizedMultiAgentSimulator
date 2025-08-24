@@ -26,7 +26,7 @@ def calculate_rewards_and_dones_jit(
     vel_diffs_norm: torch.Tensor,
     requested_accelerations_tensor: torch.Tensor,
     a1_normalized_speed_k: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     JIT兼容的全向量化函数，用于并行计算奖励和回合终止信号。
     此版本经过重构，提升了代码可读性，增加了详细注释，并减少了不必要的重复计算。
@@ -666,4 +666,4 @@ def calculate_rewards_and_dones_jit(
         time_bonus_defenders = h_params['k_defender_time_bonus'] * time_factor
         dense_reward[:, n_attackers:] += time_bonus_defenders.unsqueeze(1) * is_time_urgent.unsqueeze(1)
 
-    return dense_reward, terminal_rewards, dones_out, curr_still_counter, wall_collision_counters, defender_over_midline_counter, attacker_win_this_step, reason_code
+    return dense_reward, terminal_rewards, dones_out, curr_still_counter, wall_collision_counters, defender_over_midline_counter, attacker_win_this_step, reason_code, is_in_spot_a1.float()

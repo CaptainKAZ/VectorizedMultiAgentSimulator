@@ -121,7 +121,7 @@ class Scenario(BaseScenario):
         # =================================================================================
         # --- 3.1 投篮成功 ---
         self.h_params["max_score"] = kwargs.get("max_score", 6000.0)    # 投篮得分的基础分，离篮筐越近得分越高
-        self.h_params["shoot_score"] = kwargs.get("shoot_score", 4000.0)  # 成功出手投篮的固定额外奖励
+        self.h_params["shoot_score"] = kwargs.get("shoot_score", 5000.0)  # 成功出手投篮的固定额外奖励
         self.h_params["k_time_bonus"] = kwargs.get("k_time_bonus", 4000.0) # 投篮时间奖励系数，剩余时间越多奖励越高
         self.h_params["k_spacing_bonus"] = kwargs.get("k_spacing_bonus", 1000.0) # A1投篮时，与防守方平均距离的奖励系数
         self.h_params['k_shot_stillness_vel_bonus'] = kwargs.get("k_shot_stillness_vel_bonus", 1000.0) # A1投篮时速度够慢的额外奖励
@@ -139,11 +139,11 @@ class Scenario(BaseScenario):
         self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", 100.0)    # 超时瞬间，A1在圈内的基础奖励/惩罚
 
         # --- 3.3 犯规 ---
-        self.h_params["R_foul"] = kwargs.get("R_foul", 4000.0) # 碰撞犯规的基础奖励/惩罚值
+        self.h_params["R_foul"] = kwargs.get("R_foul", 6000.0) # 碰撞犯规的基础奖励/惩罚值
         self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 1000.0) # 碰撞犯规时，根据相对速度大小调整惩罚的系数
-        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.5) # 犯规发生时，被犯规方队友获得的奖励比例
+        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.8) # 犯规发生时，被犯规方队友获得的奖励比例
         self.h_params["R_wall_collision_penalty"] = kwargs.get("R_wall_collision_penalty", -11000.0) # 因持续撞墙导致回合结束的惩罚
-        self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 10000.0) # 防守方因持续越线导致回合结束的惩罚
+        self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 12000.0) # 防守方因持续越线导致回合结束的惩罚
 
         # --- 3.4 投篮失败 (防守方终局奖励) ---
         self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 3000.0) # 防守方因封盖贡献获得的奖励系数
@@ -230,8 +230,8 @@ class Scenario(BaseScenario):
 
         # --- 4.5 时间压力 ---
         self.h_params["time_penalty_grace_period"] = kwargs.get("time_penalty_grace_period", 8) # 回合开始后，免除时间惩罚的宽限期（秒）
-        self.h_params["k_attacker_time_penalty"] = kwargs.get("k_attacker_time_penalty", 2) # 宽限期后，若A1未进入投篮区，进攻方将受到时间惩罚
-        self.h_params["k_defender_time_bonus"] = kwargs.get("k_defender_time_bonus", 2.0)   # 宽限期后，防守方将获得持续的时间奖励
+        self.h_params["k_attacker_time_penalty"] = kwargs.get("k_attacker_time_penalty", 0.1) # 宽限期后，若A1未进入投篮区，进攻方将受到时间惩罚
+        self.h_params["k_defender_time_bonus"] = kwargs.get("k_defender_time_bonus", 0.1)   # 宽限期后，防守方将获得持续的时间奖励
 
         # --- 4.6 封盖相关参数 ---
         self.h_params["def_proximity_threshold"] = kwargs.get("def_proximity_threshold", 2.5*self.h_params["agent_radius"]) # 计算封盖时，判断防守者是否离A1足够近的距离阈值
@@ -300,6 +300,7 @@ class Scenario(BaseScenario):
         self.p_raw_actions = torch.zeros((batch_dim, self.n_agents, 2), device=device)
         self.termination_reason_code = torch.zeros(batch_dim, device=device, dtype=torch.int32)
         self.a1_normalized_speed_k = torch.zeros(batch_dim, device=device)
+        self.is_in_spot_a1 = torch.zeros(batch_dim,device=device)
 
 
         # self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit, mode="max-autotune")
@@ -479,6 +480,7 @@ class Scenario(BaseScenario):
         这是执行JIT函数的最佳位置，因为它在所有智能体动作处理后、物理引擎步进前运行。
         """
         self.win_this_step.zero_()
+        self.is_in_spot_a1.zero_()
         self.t_remaining -= self.world.dt
         self.delay_counter = torch.clamp(self.delay_counter - 1, min=0)
 
@@ -508,7 +510,7 @@ class Scenario(BaseScenario):
         self.wall_collision_counters.copy_(wall_counters_clone)
 
         # 4. 调用核心JIT函数进行计算
-        dense_rewards, terminal_rewards, dones, a1_still_frames_counter, wall_collision_counters, defender_over_midline_counter, win_this_step, updated_reason_code = \
+        dense_rewards, terminal_rewards, dones, a1_still_frames_counter, wall_collision_counters, defender_over_midline_counter, win_this_step, updated_reason_code, is_in_spot_a1 = \
             self.jitted_reward_calculator(
                 self.h_params,
                 self.all_pos,
@@ -541,6 +543,7 @@ class Scenario(BaseScenario):
         self.defender_over_midline_counter = defender_over_midline_counter.to(torch.int32)
         self.win_this_step = win_this_step
         self.termination_reason_code = updated_reason_code.to(torch.int32)
+        self.is_in_spot_a1 = is_in_spot_a1
 
         # # 可以在这里处理JIT函数无法执行的操作，比如打印
         # if torch.any(self.win_this_step):
@@ -612,6 +615,7 @@ class Scenario(BaseScenario):
 
         # 4. 获取其他关键状态信息 (这部分不变)
         spot_pos = self.spot_center.state.pos      # 形状: [B, 2]
+        is_in_spot_a1_obs = self.is_in_spot_a1.unsqueeze(-1)# 形状: [B, 1]
         basket_pos = self.basket.state.pos        # 形状: [B, 2]
         time_obs = self.t_remaining / self.h_params["t_limit"] # 形状: [B, 1]
 
@@ -620,12 +624,13 @@ class Scenario(BaseScenario):
         global_state = torch.cat([
             flat_agent_states,  # 16维
             spot_pos,           # 2维
+            is_in_spot_a1_obs,  # 1维
             basket_pos,         # 2维
             time_obs,           # 1维
         ], dim=-1)
 
         # 返回的张量形状仍然是 [B, 21]，但内部的数据排列顺序已经改变
-        return global_state
+        return global_state.clone()
         
 
     def reward(self, agent: Agent):
@@ -666,20 +671,19 @@ class Scenario(BaseScenario):
         teammate_obs = torch.cat([teammate.state.pos - self_pos, self.p_vels[:, teammate_idx] - self_vel], dim=-1)
         opp1_obs = torch.cat([opp1.state.pos - self_pos, self.p_vels[:, opp1_idx] - self_vel], dim=-1)
         opp2_obs = torch.cat([opp2.state.pos - self_pos, self.p_vels[:, opp2_idx] - self_vel], dim=-1)
-        
         spot_rel_pos = self.spot_center.state.pos - self_pos
         basket_rel_pos = self.basket.state.pos - self_pos
         time_obs = self.t_remaining / self.h_params["t_limit"]
 
-        # --- 2. 对每个实体独立填充到4维 ---
+        # --- 2. 对每个实体独立填充到4维(现在不填充了) ---
         # F.pad(tensor, (左填充, 右填充))
         if is_attacker:
-            spot_padded = spot_rel_pos
+            spot_obs = spot_rel_pos
+            is_in_spot_a1 = self.is_in_spot_a1.unsqueeze(-1)
+            
         else:
-            spot_padded = torch.zeros_like(spot_rel_pos) # 防守方不知道投篮点，用全0填充
-
-        basket_padded = basket_rel_pos
-        time_padded = time_obs
+            spot_obs = torch.zeros_like(spot_rel_pos) # 防守方不知道投篮点，用全0填充
+            is_in_spot_a1 = torch.zeros_like(self.is_in_spot_a1.unsqueeze(-1))
 
         # --- 3. 将所有维度统一的实体拼接成一个扁平的28维向量 ---
         # 7个实体 * 每个4维 = 28维
@@ -688,12 +692,13 @@ class Scenario(BaseScenario):
             teammate_obs,
             opp1_obs,
             opp2_obs,
-            spot_padded,
-            basket_padded,
-            time_padded,
+            spot_obs,
+            is_in_spot_a1,
+            basket_rel_pos,
+            time_obs,
         ], dim=-1)
     
-        return obs
+        return obs.clone()
     
     def extra_render(self, env_index: int):
         # 此部分用于在渲染窗口中额外绘制调试信息（如奖励曲线图）
