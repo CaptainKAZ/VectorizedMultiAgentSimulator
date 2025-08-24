@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import io
 import pyglet
 import numpy as np
-
+import torch.nn.functional as F
 from vmas.scenarios.layup_jit import calculate_rewards_and_dones_jit
 import time
 from functools import partial, update_wrapper
@@ -158,7 +158,7 @@ class Scenario(BaseScenario):
         # =================================================================================
 
         # --- 4.1 通用项 (General for All Agents) ---
-        self.dense_reward_factor = kwargs.get("dense_reward_factor", 0.1) # 稠密奖励整体缩放系数
+        self.dense_reward_factor = kwargs.get("dense_reward_factor", 0.01) # 稠密奖励整体缩放系数
         self.h_params["oob_penalty"] = kwargs.get("oob_penalty", -3000.0) # 出界惩罚系数
         self.h_params["oob_margin"] = kwargs.get("oob_margin", 0.05) # 出界惩罚的平滑边界宽度
         self.h_params["k_u_penalty_general"] = kwargs.get("k_u_penalty_general", 0.1) # 动作指令大小的基础惩罚系数
@@ -244,15 +244,20 @@ class Scenario(BaseScenario):
         self.n_attackers = 2
         self.n_defenders = 2
 
+        self.agent_id_encoding_map = {
+            0: torch.tensor([1, 0, 0], device=self.device),
+            1: torch.tensor([0, 1, 0], device=self.device),
+            2: torch.tensor([0, 0, 1], device=self.device),
+            3: torch.tensor([0, 0, 1], device=self.device),
+        }
+
         world = World(batch_dim, device, dt=self.dt, substeps=4,
                       x_semidim=self.h_params["W"] / 2, y_semidim=self.h_params["L"] / 2)
 
         for i in range(self.n_agents):
             is_attacker = i < self.n_attackers
-            team_name = "attacker" if is_attacker else "defender"
-            agent_id = i + 1 if is_attacker else i - self.n_attackers + 1
             agent = Agent(
-                name=f"{team_name}_{agent_id}",
+                name=f"agent_{i}",
                 collide=True,
                 movable=True,
                 rotatable=False,
@@ -603,7 +608,6 @@ class Scenario(BaseScenario):
         all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)
         all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
 
-        # 2. **【关键修改】** 将每个智能体的位置和速度拼接在一起
         # [B, N, 2] 和 [B, N, 2] -> [B, N, 4]
         # 这样，每个智能体的4个特征（pos_x, pos_y, vel_x, vel_y）就在一起了
         agent_states = torch.cat([all_pos, all_vel], dim=-1)
@@ -619,7 +623,6 @@ class Scenario(BaseScenario):
         basket_pos = self.basket.state.pos        # 形状: [B, 2]
         time_obs = self.t_remaining / self.h_params["t_limit"] # 形状: [B, 1]
 
-        # 5. **【关键修改】** 按照 entity_configs 的顺序将所有信息拼接
         # 顺序: 4个agent, 1个spot, 1个basket, 1个time
         global_state = torch.cat([
             flat_agent_states,  # 16维
@@ -645,10 +648,96 @@ class Scenario(BaseScenario):
             is_delayed = self.delay_counter > 0
             rew = torch.where(is_delayed, 0.0, rew)
         return rew
+    
+    def get_all_critic_obs(self):
+        """
+        一次性计算并返回所有智能体的、以自我为中心的 Critic 观测矩阵。
+        特征顺序: one-hot, self, teammate, opp1, opp2, spot, in_spot, basket, time
+        
+        返回:
+            torch.Tensor: 所有智能体的 Critic 观测，
+                        形状为 [B, N, D_critic_obs]。
+        """
+        batch_dim = self.world.batch_dim
+        n_agents = len(self.world.agents)
+        n_attackers = 2 # 根据您的描述，idx < 2 的是 attacker
+
+        # --- 1. 预计算所有基础组件 (在循环外执行) ---
+
+        # a) 所有智能体的状态 (pos+vel)
+        # all_pos/all_vel 的形状为 [B, N, 2]
+        all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)
+        all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
+        # all_agent_states 形状: [B, N, 4]
+        all_agent_states = torch.cat([all_pos, all_vel], dim=-1)
+
+        # b) 所有环境状态
+        spot_pos = self.spot_center.state.pos          # [B, 2]
+        is_in_spot_a1_obs = self.is_in_spot_a1.unsqueeze(-1) # [B, 1]
+        basket_pos = self.basket.state.pos             # [B, 2]
+        time_obs = self.t_remaining / self.h_params["t_limit"] # [B, 1]
+        # env_state_part 形状: [B, 6]
+        env_state_part = torch.cat([
+            spot_pos, is_in_spot_a1_obs, basket_pos, time_obs
+        ], dim=-1)
+
+        # c) 所有智能体的ID编码
+        # all_encodings 形状: [N, D_onehot] e.g., [4, 3]
+        all_encodings = torch.stack(
+            [self.agent_id_encoding_map[i] for i in range(n_agents)], 
+            dim=0
+        )
+        # 扩展以匹配 batch 维度 -> [B, N, D_onehot]
+        all_encodings_expanded = all_encodings.unsqueeze(0).expand(batch_dim, -1, -1)
+
+        # --- 2. 遍历每个智能体，构建其专属观测 ---
+        obs_per_agent = []
+        for agent_idx in range(n_agents):
+            # a) 确定 self, teammate, opp1, opp2 的索引
+            is_attacker = agent_idx < n_attackers
+            if is_attacker:
+                # 当前 agent 是 attacker
+                teammate_idx = 1 - agent_idx # 0 -> 1, 1 -> 0
+                opp1_idx, opp2_idx = 2, 3
+            else:
+                # 当前 agent 是 defender
+                # 2 -> 3, 3 -> 2
+                teammate_idx = 1 - (agent_idx - n_attackers) + n_attackers
+                opp1_idx, opp2_idx = 0, 1
+            
+            # b) 根据索引顺序从 all_agent_states 中提取数据
+            order_indices = [agent_idx, teammate_idx, opp1_idx, opp2_idx]
+            
+            # advanced indexing: 从 [B, N, 4] 中按顺序取出4个智能体的状态
+            # 结果形状: [B, 4, 4] (4个智能体, 每个4个特征)
+            ordered_agent_states = all_agent_states[:, order_indices, :]
+            
+            # 扁平化智能体状态部分 -> [B, 16]
+            flat_ordered_agent_states = ordered_agent_states.reshape(batch_dim, -1)
+
+            # c) 获取当前智能体的 one-hot 编码 -> [B, D_onehot]
+            current_one_hot = all_encodings_expanded[:, agent_idx, :]
+
+            # d) 拼接成最终的观测向量
+            # 顺序: one-hot, self, teammate, opp1, opp2, spot, in_spot, basket, time
+            final_obs_for_agent = torch.cat([
+                current_one_hot,
+                flat_ordered_agent_states, # 已经包含了 self, teammate, opps
+                env_state_part
+            ], dim=-1)
+
+            obs_per_agent.append(final_obs_for_agent)
+
+        # --- 3. 将所有智能体的观测堆叠成一个最终矩阵 ---
+        # list of [B, D_obs] -> [B, N, D_obs]
+        final_matrix = torch.stack(obs_per_agent, dim=1)
+
+        return final_matrix.clone()
 
     # @timer
     def observation(self, agent: Agent):
         agent_idx = self.world.agents.index(agent)
+        agent_id_encoding = self.agent_id_encoding_map[agent_idx]
         is_attacker = agent_idx < self.n_attackers
 
         # --- 1. 为每个逻辑实体创建独立的、未填充的张量 ---
@@ -686,8 +775,8 @@ class Scenario(BaseScenario):
             is_in_spot_a1 = torch.zeros_like(self.is_in_spot_a1.unsqueeze(-1))
 
         # --- 3. 将所有维度统一的实体拼接成一个扁平的28维向量 ---
-        # 7个实体 * 每个4维 = 28维
         obs = torch.cat([
+            agent_id_encoding,
             self_obs,
             teammate_obs,
             opp1_obs,
