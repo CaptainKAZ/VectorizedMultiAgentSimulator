@@ -119,39 +119,10 @@ class Scenario(BaseScenario):
         # =================================================================================
         # 3. 终局奖励设定 (Terminal Rewards)
         # =================================================================================
-        # --- 3.1 投篮成功 ---
-        self.h_params["max_score"] = kwargs.get("max_score", 6000.0)    # 投篮得分的基础分，离篮筐越近得分越高
-        self.h_params["shoot_score"] = kwargs.get("shoot_score", 5000.0)  # 成功出手投篮的固定额外奖励
-        self.h_params["k_time_bonus"] = kwargs.get("k_time_bonus", 4000.0) # 投篮时间奖励系数，剩余时间越多奖励越高
-        self.h_params["k_spacing_bonus"] = kwargs.get("k_spacing_bonus", 1000.0) # A1投篮时，与防守方平均距离的奖励系数
-        self.h_params['k_shot_stillness_vel_bonus'] = kwargs.get("k_shot_stillness_vel_bonus", 1000.0) # A1投篮时速度够慢的额外奖励
-        self.h_params['k_shot_stillness_act_bonus'] = kwargs.get("k_shot_stillness_act_bonus", 1000.0) # A1投篮时动作指令够小的额外奖励
-        self.h_params["k_a2_screen_bonus"] = kwargs.get("k_a2_screen_bonus", 2000.0) # A1投篮时，A2成功掩护的额外奖励
-        self.h_params["a2_screen_sigma"] = kwargs.get("a2_screen_sigma", 4 * self.h_params["agent_radius"]) # A2掩护奖励高斯函数的标准差
-
-        # --- 3.2 进攻超时 ---
-        self.h_params["defender_timeout_reward"] = kwargs.get("defender_timeout_reward", 9000.0) # 进攻超时，防守方获得的奖励
-        self.h_params["attacker_timeout_reward_max"] = kwargs.get("attacker_timeout_reward_max", 2000) # 进攻超时，进攻方惩罚/奖励的绝对值上限
-        self.h_params["k_timeout_move_vel_penalty"] = kwargs.get("k_timeout_move_vel_penalty", 200.0) # 超时瞬间，A1因速度过大受到的惩罚系数
-        self.h_params["k_timeout_move_act_penalty"] = kwargs.get("k_timeout_move_act_penalty", 200.0) # 超时瞬间，A1因动作指令过大受到的惩罚系数
-        self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 100.0) # 超时瞬间，A1在圈外时，根据距离远近受到的惩罚系数
-        self.h_params["attacker_timeout_base_reward_out_spot"] = kwargs.get("attacker_timeout_base_reward_out_spot", -100.0) # 超时瞬间，A1在圈外的基础惩罚
-        self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", 100.0)    # 超时瞬间，A1在圈内的基础奖励/惩罚
-
-        # --- 3.3 犯规 ---
-        self.h_params["R_foul"] = kwargs.get("R_foul", 6000.0) # 碰撞犯规的基础奖励/惩罚值
-        self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 1000.0) # 碰撞犯规时，根据相对速度大小调整惩罚的系数
-        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.8) # 犯规发生时，被犯规方队友获得的奖励比例
-        self.h_params["R_wall_collision_penalty"] = kwargs.get("R_wall_collision_penalty", -11000.0) # 因持续撞墙导致回合结束的惩罚
-        self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 12000.0) # 防守方因持续越线导致回合结束的惩罚
-
-        # --- 3.4 投篮失败 (防守方终局奖励) ---
-        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 3000.0) # 防守方因封盖贡献获得的奖励系数
-        self.h_params["k_def_force_reward"] = kwargs.get("k_def_force_reward", 2000.0) # 防守方因迫使A1远离篮筐投篮获得的奖励系数
-        self.h_params["k_def_pos_reward"] = kwargs.get("k_def_pos_reward", 100.0)   # 防守方因占据理想防守位置获得的奖励系数
-        self.h_params["k_def_area_reward"] = kwargs.get("k_def_area_reward", 150.0)  # 防守方因控制投篮区域获得的奖励系数
-        self.h_params["k_def_shot_penalty"] = kwargs.get("k_def_shot_penalty", 300.0)  # 对方投篮时，防守方受到的基础小额惩罚（鼓励积极防守）
-
+        self.h_params["R_WIN_MIN"] = kwargs.get("R_WIN_MIN", 2000.0) # 在边缘出手胜利
+        self.h_params["R_WIN_MAX"] = kwargs.get("R_WIN_MAX", 10000.0) # 在中心出手时大胜
+        self.h_params["R_TIMEOUT_WIN"] = kwargs.get("R_TIMEOUT_WIN", 12000.0) # 防守方通过超时获胜的“完美胜利”奖励
+        self.h_params["R_VIOLATION"] = kwargs.get("R_VIOLATION", 15000.0) # 违反规则的惩罚
 
         # =================================================================================
         # 4. 稠密奖励与行为塑造 (Dense Rewards & Behavior Shaping)
@@ -253,6 +224,13 @@ class Scenario(BaseScenario):
 
         world = World(batch_dim, device, dt=self.dt, substeps=4,
                       x_semidim=self.h_params["W"] / 2, y_semidim=self.h_params["L"] / 2)
+        
+        color_map = {
+            0: Color.RED,
+            1: Color.PINK,
+            2: Color.PURPLE,
+            3: Color.BLUE
+        }
 
         for i in range(self.n_agents):
             is_attacker = i < self.n_attackers
@@ -266,7 +244,7 @@ class Scenario(BaseScenario):
                 shape=Sphere(radius=self.h_params["agent_radius"]),
                 dynamics=Holonomic(),
                 render_action=True,
-                color=Color.RED if is_attacker and i == 1 else Color.BLUE if not is_attacker else Color.PINK,
+                color=color_map[i],
                 action_size=3
             )
             agent.is_attacker = is_attacker

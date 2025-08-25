@@ -72,246 +72,155 @@ def calculate_rewards_and_dones_jit(
     # --- 条件1: 尝试投篮 (Shot Attempt) ---
     dist_a1_to_spot = torch.linalg.norm(a1_pos - spot_center_pos, dim=1)
     
-    # 判断A1是否满足“准备投篮”的状态：在区域内、速度足够慢、没有加速意图、而且正在踩刹车
+    # 判断A1是否满足“准备投篮”的状态
     in_area = (dist_a1_to_spot <= h_params['R_spot']) & (a1_pos[:, 1] > 0)
     is_still = torch.linalg.norm(a1_vel, dim=1) < h_params['v_shot_threshold']
     not_accelerating = (torch.linalg.norm(raw_actions[:, 0, :], dim=1) < h_params['a_shot_threshold']) | is_braking[:, 0]
     is_ready_to_shoot = in_area & is_still & not_accelerating
     
-    # 更新A1静止计数器，如果满足准备条件则+1，否则清零
+    # 更新A1静止计数器
     prev_still_counter = a1_still_frames_counter
     curr_still_counter = torch.where(is_ready_to_shoot, prev_still_counter + 1, 0)
     
     # 如果静止帧数达到阈值，则触发投篮
     shot_attempted = (curr_still_counter >= h_params['shot_still_frames']) & ~dones_out
     if torch.any(shot_attempted):
-        shot_b_idx = shot_attempted.nonzero().squeeze(-1) # 发生投篮的环境索引
+        shot_b_idx = shot_attempted.nonzero().squeeze(-1)
         
-        # 提取投篮瞬间的状态
+        # 提取状态
         a1_pos_shot = a1_pos[shot_b_idx]
-        a2_pos_shot = all_pos[shot_b_idx, 1]
-        spot_pos_shot = spot_center_pos[shot_b_idx]
         basket_pos_shot = basket_pos[shot_b_idx]
         defender_pos_shot = all_pos[shot_b_idx][:, 2:]
+        dist_a1_to_spot_shot = dist_a1_to_spot[shot_b_idx]
 
         # --- 计算封盖因子 ---
-        # 核心逻辑：判断防守球员是否在A1到篮筐的路径上，并根据距离计算封盖程度
         shot_vector = basket_pos_shot - a1_pos_shot
         blocker_vector = defender_pos_shot - a1_pos_shot.unsqueeze(1)
-        
         shot_vector_norm_sq = torch.sum(shot_vector**2, dim=-1, keepdim=True) + 1e-6
         dot_product = torch.sum(blocker_vector * shot_vector.unsqueeze(1), dim=-1)
         proj_len_ratio = dot_product / shot_vector_norm_sq
-        
-        # 硬门控：防守者必须在A1和篮筐之间
         is_between = (proj_len_ratio > 0) & (proj_len_ratio < 1)
-        
-        # 计算防守者到投篮路径的垂直距离
         projection = proj_len_ratio.unsqueeze(-1) * shot_vector.unsqueeze(1)
         dist_perp_sq = torch.sum((blocker_vector - projection)**2, dim=-1)
-        
-        # 软门控：防守者离A1越近，封盖贡献的权重越高 (Sigmoid函数实现软切换)
         dist_a1_to_def = torch.linalg.norm(blocker_vector, dim=-1)
         gate_input = h_params['def_proximity_threshold'] - dist_a1_to_def
         soft_proximity_gate = torch.sigmoid(h_params['block_gate_k'] * gate_input)
-        
         is_blocker_per_defender = is_between & (dist_perp_sq < (h_params['proximity_threshold'])**2)
-        
-        # 综合计算每个防守者的封盖贡献
         block_contribution = (
-            torch.exp(-dist_perp_sq / (2 * h_params['block_sigma']**2)) # 基于横向距离
-            * is_blocker_per_defender.float()                          # 基于站位的硬门控
-            * soft_proximity_gate                                      # 基于纵向距离的软门控
+            torch.exp(-dist_perp_sq / (2 * h_params['block_sigma']**2))
+            * is_blocker_per_defender.float()
+            * soft_proximity_gate
         )
         total_block_factor = torch.clamp(block_contribution.sum(dim=1), 0, 1)
 
-        # --- 判断胜负并分配原因码 ---
-        is_a_winning_shot = total_block_factor < h_params['win_condition_block_threshold']
-        winning_shot_indices = shot_b_idx[is_a_winning_shot]
-        losing_shot_indices = shot_b_idx[~is_a_winning_shot]
+        # --- 基于位置和封盖因子，计算共享的零和奖励 ---
+        
+        # 1. 计算双方的“奖池”大小
+        # 进攻奖池：离靶心越近，奖池越大
+        quality_factor_offense = torch.clamp(1.0 - (dist_a1_to_spot_shot / h_params['R_spot']), 0.0, 1.0)
+        dynamic_reward_offense = h_params['R_WIN_MIN'] + (h_params['R_WIN_MAX'] - h_params['R_WIN_MIN']) * quality_factor_offense
+        # 防守奖池：迫使对手离靶心越远，奖池越大
+        quality_factor_defense = torch.clamp(dist_a1_to_spot_shot / h_params['R_spot'], 0.0, 1.0)
+        dynamic_reward_defense = h_params['R_WIN_MIN'] + (h_params['R_WIN_MAX'] - h_params['R_WIN_MIN']) * quality_factor_defense
 
-        if winning_shot_indices.numel() > 0:
-            attacker_win_this_step[winning_shot_indices] = True
-            reason_code[winning_shot_indices] = 1 # 原因码1: 投篮命中
-        if losing_shot_indices.numel() > 0:
-            reason_code[losing_shot_indices] = 11 # 原因码11: 投篮被盖
-        
-        # --- 计算进攻方奖励 (A1 & A2) ---
-        base_score = h_params['max_score'] * (1 - dist_a1_to_spot[shot_b_idx] / h_params['R_spot'])
-        final_score_modified = base_score * (1 - total_block_factor)
-        time_bonus = h_params['k_time_bonus'] * (t_remaining[shot_b_idx].squeeze(-1) / h_params['t_limit']) * (1 - total_block_factor)
-        
-        dist_a1_to_defs_shot = torch.linalg.norm(blocker_vector, dim=-1)
-        avg_dist_to_defs = torch.mean(dist_a1_to_defs_shot, dim=1)
-        spacing_bonus = h_params['k_spacing_bonus'] * avg_dist_to_defs
-        
-        # A1 投篮静止奖励：速度越小、动作指令越小，奖励越高
-        a1_speed_shot = torch.linalg.norm(a1_vel[shot_b_idx], dim=-1)
-        a1_action_norm_shot = torch.linalg.norm(raw_actions[shot_b_idx, 0, :], dim=-1)
-        vel_stillness_bonus = h_params['k_shot_stillness_vel_bonus'] * torch.exp(-a1_speed_shot)
-        act_stillness_bonus = h_params['k_shot_stillness_act_bonus'] * torch.exp(-a1_action_norm_shot)
-        
-        a1_reward = final_score_modified + spacing_bonus + time_bonus + vel_stillness_bonus + act_stillness_bonus + h_params['shoot_score']
-        terminal_rewards[shot_b_idx, 0] += a1_reward
+        # 2. 计算双方的“成果占比”
+        attacker_share = 1.0 - total_block_factor
+        defender_share = total_block_factor
 
-        # A2 掩护奖励：判断A2是否为A1挡住了最关键的防守者
-        _, closest_def_indices = torch.min(dist_a1_to_defs_shot**2, dim=1)
-        batch_indices = torch.arange(len(shot_b_idx), device=device)
-        p_closest_def = defender_pos_shot[batch_indices, closest_def_indices]
-        
-        def_to_a1_vec = a1_pos_shot - p_closest_def
-        def_to_a1_unit_vec = def_to_a1_vec / (torch.linalg.norm(def_to_a1_vec, dim=-1, keepdim=True) + 1e-6)
-        ideal_screen_pos = p_closest_def + h_params['screen_pos_offset'] * def_to_a1_unit_vec
-        
-        dist_a2_to_ideal_sq = torch.sum((a2_pos_shot - ideal_screen_pos)**2, dim=-1)
-        
-        # 位置门控: 确认A2在A1和防守者之间，形成有效掩护
-        vec_a2_to_def = p_closest_def - a2_pos_shot
-        vec_a2_to_a1 = a1_pos_shot - a2_pos_shot
-        dot_product_gate = torch.sum(vec_a2_to_def * vec_a2_to_a1, dim=-1)
-        screen_gate = torch.sigmoid(-h_params['k_screen_gate'] * dot_product_gate)
-        
-        screen_bonus = h_params['k_a2_screen_bonus'] * torch.exp(-dist_a2_to_ideal_sq / (2 * h_params['a2_screen_sigma']**2)) * screen_gate
-        a2_reward = final_score_modified + screen_bonus + spacing_bonus + time_bonus
-        terminal_rewards[shot_b_idx, 1] += a2_reward
+        # 3. 计算最终的团队奖励
+        attacker_team_reward = attacker_share * dynamic_reward_offense - defender_share * dynamic_reward_defense
+        defender_team_reward = defender_share * dynamic_reward_defense - attacker_share * dynamic_reward_offense
+        # (注意: defender_team_reward = -attacker_team_reward，依然是零和)
 
-        # --- 计算防守方奖励 (D1 & D2) ---
-        for i in range(n_defenders):
-            R_block = h_params['k_def_block_reward'] * block_contribution[:, i] # 封盖贡献奖励
-            R_force = h_params['k_def_force_reward'] * (dist_a1_to_spot[shot_b_idx] / h_params['R_spot']) # 迫使远离投篮点奖励
-            
-            # 站位奖励：奖励防守者站在A1和篮筐之间
-            a1_to_basket_unit_vec = (basket_pos_shot - a1_pos_shot) / (torch.linalg.norm(basket_pos_shot - a1_pos_shot, dim=-1, keepdim=True) + 1e-6)
-            ideal_pos = a1_pos_shot + h_params['def_pos_offset'] * a1_to_basket_unit_vec
-            dist_to_ideal_sq = torch.sum((defender_pos_shot[:, i, :] - ideal_pos)**2, dim=-1)
-            
-            # 位置门控：确保防守者在A1"身后"（朝向篮筐方向）
-            d_from_a1_vec = defender_pos_shot[:, i, :] - a1_pos_shot
-            proj_dot = torch.sum(d_from_a1_vec * a1_to_basket_unit_vec, dim=-1)
-            pos_gate = torch.sigmoid(5.0 * proj_dot)
-            
-            positioning_reward_factor = torch.exp(-dist_to_ideal_sq / (2 * h_params['def_pos_sigma']**2))
-            R_positioning = h_params['k_def_pos_reward'] * positioning_reward_factor * pos_gate
-            
-            # 区域控制奖励：奖励防守者靠近投篮点中心
-            dist_def_to_spot_sq = torch.sum((defender_pos_shot[:, i, :] - spot_pos_shot)**2, dim=-1)
-            R_area_control = h_params['k_def_area_reward'] * torch.exp(-dist_def_to_spot_sq / (2 * h_params['def_gaussian_spot_sigma']**2))
-            
-            total_def_reward = R_block + R_force + R_positioning + R_area_control - h_params['k_def_shot_penalty']
-            terminal_rewards[shot_b_idx, n_attackers + i] += total_def_reward
+        # 4. 分配奖励到每个智能体
+        terminal_rewards[shot_b_idx, :n_attackers] = (attacker_team_reward / n_attackers).unsqueeze(-1)
+        terminal_rewards[shot_b_idx, n_attackers:] = (defender_team_reward / n_defenders).unsqueeze(-1)
         
+        # 更新终止原因码和胜利标志（可选，但有助于分析）
+        # 净收益为正的一方可视为“获胜”
+        is_attacker_net_positive = attacker_team_reward > 0
+        b_idx_att_win = shot_b_idx[is_attacker_net_positive]
+        b_idx_def_win = shot_b_idx[~is_attacker_net_positive]
+        if b_idx_att_win.numel() > 0:
+            attacker_win_this_step[b_idx_att_win] = True
+            reason_code[b_idx_att_win] = 1 # 原因码1: 进攻得分
+        if b_idx_def_win.numel() > 0:
+            reason_code[b_idx_def_win] = 11 # 原因码11: 防守得分
+            
         dones_out |= shot_attempted
 
     # --- 条件2: 时间耗尽 (Time Up) ---
     time_up = (t_remaining.squeeze(-1) <= 0) & ~dones_out
     if torch.any(time_up):
-        # 提取超时瞬间的状态
-        dist_a1_to_spot_timeout = dist_a1_to_spot[time_up] # 复用之前计算的距离
-        is_in_spot = dist_a1_to_spot_timeout <= h_params['R_spot']
-
-        # 移动惩罚：如果超时瞬间A1仍在高速移动，则施加惩罚
-        a1_speed_timeout = torch.linalg.norm(a1_vel[time_up], dim=-1)
-        a1_action_norm_timeout = torch.linalg.norm(raw_actions[time_up, 0, :], dim=-1)
-        vel_penalty = h_params['k_timeout_move_vel_penalty'] * a1_speed_timeout
-        act_penalty = h_params['k_timeout_move_act_penalty'] * a1_action_norm_timeout
-        total_movement_penalty = vel_penalty + act_penalty
-
-        # 根据A1是否在投篮圈内，计算不同的奖惩
-        # 在圈内：获得基础奖励，但减去移动惩罚
-        reward_in_spot = h_params['attacker_timeout_reward_in_spot'] - total_movement_penalty
-        # 在圈外：根据离圈的距离获得惩罚
-        reward_out_of_spot = h_params['attacker_timeout_base_reward_out_spot'] - h_params['k_timeout_dist_reward_factor'] * dist_a1_to_spot_timeout
-
-        attacker_reward = torch.where(is_in_spot, reward_in_spot, reward_out_of_spot)
-        attacker_reward_clamped = torch.clamp(
-            attacker_reward,
-            min=-h_params['attacker_timeout_reward_max'],
-            max=h_params['attacker_timeout_reward_max']
-        )
-        
-        # 分配奖惩
-        terminal_rewards[time_up, 0] = attacker_reward_clamped
-        terminal_rewards[time_up, 1] = h_params["foul_teammate_factor"] * attacker_reward_clamped
-        terminal_rewards[time_up, n_attackers:] = h_params['defender_timeout_reward'] # 防守方获得固定奖励
-        
-        reason_code[time_up] = 12 # 原因码12: 进攻超时
+        # 防守方获得“完美胜利”的最高奖励
+        terminal_rewards[time_up, :n_attackers] = -h_params['R_TIMEOUT_WIN'] / n_attackers
+        terminal_rewards[time_up, n_attackers:] = h_params['R_TIMEOUT_WIN'] / n_defenders
+        reason_code[time_up] = 12
         dones_out |= time_up
     
     # --- 条件3: 碰撞犯规 (Foul) ---
-    # is_foul 条件: 发生碰撞 & 相对速度超过阈值 & 回合尚未结束
     is_foul = collision_matrix & (vel_diffs_norm > h_params['v_foul_threshold']) & ~dones_out.view(-1, 1, 1)
     if torch.triu(is_foul, diagonal=1).any():
         foul_indices = torch.triu(is_foul, diagonal=1).nonzero()
-        b_idx, i_idx, j_idx = foul_indices.T # JIT 兼容的解包
-
-        # 犯规惩罚大小与相对速度挂钩
-        relative_speeds = vel_diffs_norm[b_idx, i_idx, j_idx]
-        dynamic_foul_magnitude = h_params['R_foul'] + h_params['k_foul_vel_penalty'] * relative_speeds
+        b_idx, i_idx, j_idx = foul_indices.T
         
-        # 判断谁是主动撞人者 (active)
         agent_i_p_vel = p_vels[b_idx, i_idx]
         pos_rel = all_pos[b_idx, j_idx] - all_pos[b_idx, i_idx]
         vel_rel_on_pos = torch.einsum("bd,bd->b", agent_i_p_vel, pos_rel)
         i_is_active = vel_rel_on_pos > 0
         active_indices = torch.where(i_is_active, i_idx, j_idx)
-        passive_indices = torch.where(i_is_active, j_idx, i_idx)
         
         active_is_attacker = active_indices < n_attackers
-        passive_is_attacker = passive_indices < n_attackers
-        is_friendly_fire = (active_is_attacker == passive_is_attacker)
+        passive_indices = torch.where(i_is_active, j_idx, i_idx)
+        is_friendly_fire = (active_is_attacker == (passive_indices < n_attackers))
         
-        # 使用 index_add_ 高效地将犯规奖惩累加到对应环境中
         foul_rewards = torch.zeros_like(terminal_rewards)
         
-        # 情况A: 敌对犯规
+        # 情况A: 敌对犯规 (零和) - 使用固定的最大奖励值
         opp_foul_mask = ~is_friendly_fire
         if torch.any(opp_foul_mask):
             opp_b = b_idx[opp_foul_mask]
             opp_active = active_indices[opp_foul_mask]
-            opp_passive = passive_indices[opp_foul_mask]
-            opp_magnitude = dynamic_foul_magnitude[opp_foul_mask]
-            
-            # 为犯规的智能体创建奖惩
-            num_opp_fouls = opp_b.shape[0]
-            opp_rewards_to_add = torch.zeros(num_opp_fouls, n_agents, device=device)
-            opp_row_indices = torch.arange(num_opp_fouls, device=device)
-            
-            # 主动犯规者受罚，被犯规者得利
-            opp_rewards_to_add[opp_row_indices, opp_active] = -opp_magnitude
-            opp_rewards_to_add[opp_row_indices, opp_passive] = opp_magnitude * h_params['foul_teammate_factor']
-            # 注意：此处原版代码中注释掉了对队友的奖惩，我们遵循当前有效逻辑
-            
-            foul_rewards.index_add_(0, opp_b, opp_rewards_to_add)
-            
-            # 根据犯规方判断胜负
             active_is_defender = opp_active >= n_attackers
-            attacker_win_this_step[opp_b[active_is_defender]] = True
-            reason_code[opp_b[active_is_defender]] = 2 # 原因码2: 对手犯规
-            reason_code[opp_b[~active_is_defender]] = 13 # 原因码13: 己方犯规
+            
+            att_win_mask = active_is_defender
+            if torch.any(att_win_mask):
+                b_idx_att_win = opp_b[att_win_mask]
+                attacker_win_this_step[b_idx_att_win] = True
+                reason_code[b_idx_att_win] = 2
+                foul_rewards[b_idx_att_win, :n_attackers] = h_params['R_WIN_MAX'] / n_attackers
+                foul_rewards[b_idx_att_win, n_attackers:] = -h_params['R_WIN_MAX'] / n_defenders
+            
+            def_win_mask = ~active_is_defender
+            if torch.any(def_win_mask):
+                b_idx_def_win = opp_b[def_win_mask]
+                reason_code[b_idx_def_win] = 13
+                foul_rewards[b_idx_def_win, n_attackers:] = h_params['R_WIN_MAX'] / n_defenders
+                foul_rewards[b_idx_def_win, :n_attackers] = -h_params['R_WIN_MAX'] / n_attackers
 
-        # 情况B: 友军误伤 (Friendly Fire)
+        # 情况B: 友军误伤 (规则惩罚)
         ff_foul_mask = is_friendly_fire
         if torch.any(ff_foul_mask):
             ff_b = b_idx[ff_foul_mask]
             ff_active = active_indices[ff_foul_mask]
             ff_passive = passive_indices[ff_foul_mask]
-            ff_magnitude = dynamic_foul_magnitude[ff_foul_mask]
-            
+
+            # 误伤，犯规双方都受罚 (使用 index_add_ 修复)
             num_ff_fouls = ff_b.shape[0]
             ff_rewards_to_add = torch.zeros(num_ff_fouls, n_agents, device=device)
             ff_row_indices = torch.arange(num_ff_fouls, device=device)
 
-            # 友军误伤，双方都受罚
-            ff_rewards_to_add[ff_row_indices, ff_active] = -ff_magnitude
-            ff_rewards_to_add[ff_row_indices, ff_passive] = -ff_magnitude
+            # Assign the penalty to both agents involved in the collision
+            ff_rewards_to_add[ff_row_indices, ff_active] = -h_params['R_VIOLATION']
+            ff_rewards_to_add[ff_row_indices, ff_passive] = -h_params['R_VIOLATION']
             
+            # Add the penalties to the main foul rewards tensor
             foul_rewards.index_add_(0, ff_b, ff_rewards_to_add)
 
-            # 根据误伤方判断胜负
+            # Update reason codes (this logic is unchanged)
             ff_active_is_attacker = active_is_attacker[ff_foul_mask]
-            attacker_win_this_step[ff_b[~ff_active_is_attacker]] = True # 防守方误伤 -> 进攻方胜利
-            reason_code[ff_b[~ff_active_is_attacker]] = 5 # 原因码5: 对手友军误伤
-            reason_code[ff_b[ff_active_is_attacker]] = 15 # 原因码15: 己方友军误伤
+            reason_code[ff_b[~ff_active_is_attacker]] = 5 # 对手友军误伤
+            reason_code[ff_b[ff_active_is_attacker]] = 15 # 己方友军误伤
             
         terminal_rewards += foul_rewards
         dones_out[b_idx] = True
@@ -322,31 +231,16 @@ def calculate_rewards_and_dones_jit(
     if torch.any(wall_timeout_triggered_in_env):
         b_idx = wall_timeout_triggered_in_env.nonzero().squeeze(-1)
         
-        # 判断是哪一方撞墙导致结束
+        offending_mask = is_wall_timeout_per_agent[b_idx]
+        rewards_to_add = torch.zeros_like(terminal_rewards[b_idx])
+        rewards_to_add[offending_mask] = -h_params['R_VIOLATION']
+        terminal_rewards[b_idx] = rewards_to_add
+        
         triggering_agents_in_env = is_wall_timeout_per_agent[b_idx]
         is_defender_triggered = triggering_agents_in_env[:, n_attackers:].any(dim=1)
-        
-        # 防守方撞墙 -> 进攻方赢
-        b_idx_def_wall_coll = b_idx[is_defender_triggered]
-        if b_idx_def_wall_coll.numel() > 0:
-            attacker_win_this_step[b_idx_def_wall_coll] = True
-            reason_code[b_idx_def_wall_coll] = 3 # 原因码3: 对手失误-撞墙
-            
-        # 进攻方撞墙 -> 进攻方输
-        b_idx_att_wall_coll = b_idx[~is_defender_triggered]
-        if b_idx_att_wall_coll.numel() > 0:
-            reason_code[b_idx_att_wall_coll] = 14 # 原因码14: 己方失误-撞墙
+        reason_code[b_idx[is_defender_triggered]] = 3
+        reason_code[b_idx[~is_defender_triggered]] = 14
 
-        # 只惩罚当前正靠在墙边的智能体
-        wall_x = h_params['W'] / 2 * 0.99
-        wall_y = h_params['L'] / 2 * 0.99
-        all_pos_in_env = all_pos[b_idx]
-        is_at_wall_mask = (torch.abs(all_pos_in_env[..., 0]) > wall_x) | (torch.abs(all_pos_in_env[..., 1]) > wall_y)
-        
-        rewards_subset = terminal_rewards[b_idx]
-        rewards_subset[is_at_wall_mask] += h_params['R_wall_collision_penalty']
-        terminal_rewards[b_idx] = rewards_subset
-        
         dones_out[b_idx] = True
 
     # --- 条件5: 防守方越过中线过久犯规 (Defender Over Midline Foul) ---
@@ -358,16 +252,14 @@ def calculate_rewards_and_dones_jit(
     if torch.any(midline_foul_triggered_in_env):
         b_idx = midline_foul_triggered_in_env.nonzero().squeeze(-1)
         
-        attacker_win_this_step[b_idx] = True
-        reason_code[b_idx] = 4 # 原因码4: 对手失误-越线
+        reason_code[b_idx] = 4
         
-        # 只惩罚当前正处于越线状态的防守方
-        offending_defenders_pos = defender_pos[b_idx]
-        is_offending_defender = offending_defenders_pos[:, :, 1] < 0
-        
-        defender_rewards_subset = terminal_rewards[b_idx, n_attackers:]
-        defender_rewards_subset[is_offending_defender] -= h_params['R_midline_foul']
-        terminal_rewards[b_idx, n_attackers:] = defender_rewards_subset
+        offending_mask = midline_foul_per_defender[b_idx]
+        rewards_to_add = torch.zeros_like(terminal_rewards[b_idx])
+        def_rewards = torch.zeros_like(rewards_to_add[:, n_attackers:])
+        def_rewards[offending_mask] = -h_params['R_VIOLATION']
+        rewards_to_add[:, n_attackers:] = def_rewards
+        terminal_rewards[b_idx] = rewards_to_add
         
         dones_out[b_idx] = True
 
