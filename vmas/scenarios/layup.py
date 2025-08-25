@@ -245,10 +245,10 @@ class Scenario(BaseScenario):
         self.n_defenders = 2
 
         self.agent_id_encoding_map = {
-            0: torch.tensor([1, 0, 0], device=self.device),
-            1: torch.tensor([0, 1, 0], device=self.device),
-            2: torch.tensor([0, 0, 1], device=self.device),
-            3: torch.tensor([0, 0, 1], device=self.device),
+            0: torch.tensor([1, 0, 0], device=device),
+            1: torch.tensor([0, 1, 0], device=device),
+            2: torch.tensor([0, 0, 1], device=device),
+            3: torch.tensor([0, 0, 1], device=device),
         }
 
         world = World(batch_dim, device, dt=self.dt, substeps=4,
@@ -266,7 +266,7 @@ class Scenario(BaseScenario):
                 shape=Sphere(radius=self.h_params["agent_radius"]),
                 dynamics=Holonomic(),
                 render_action=True,
-                color=Color.RED if is_attacker and agent_id == 1 else Color.BLUE if not is_attacker else Color.PINK,
+                color=Color.RED if is_attacker and i == 1 else Color.BLUE if not is_attacker else Color.PINK,
                 action_size=3
             )
             agent.is_attacker = is_attacker
@@ -737,7 +737,7 @@ class Scenario(BaseScenario):
     # @timer
     def observation(self, agent: Agent):
         agent_idx = self.world.agents.index(agent)
-        agent_id_encoding = self.agent_id_encoding_map[agent_idx]
+        agent_id_encoding = self.agent_id_encoding_map[agent_idx].expand(self.world.batch_dim, -1)
         is_attacker = agent_idx < self.n_attackers
 
         # --- 1. 为每个逻辑实体创建独立的、未填充的张量 ---
