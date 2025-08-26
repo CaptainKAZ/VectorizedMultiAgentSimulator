@@ -152,9 +152,25 @@ def calculate_rewards_and_dones_jit(
     # --- 条件2: 时间耗尽 (Time Up) ---
     time_up = (t_remaining.squeeze(-1) <= 0) & ~dones_out
     if torch.any(time_up):
-        # 防守方获得“完美胜利”的最高奖励
-        terminal_rewards[time_up, :n_attackers] = -h_params['R_TIMEOUT_WIN'] / n_attackers
-        terminal_rewards[time_up, n_attackers:] = h_params['R_TIMEOUT_WIN'] / n_defenders
+        dist_a1_to_spot_timeout = dist_a1_to_spot[time_up]
+        is_in_spot_timeout = dist_a1_to_spot_timeout <= h_params['R_spot']
+        
+        # 定义动态超时奖励
+        # 情况1: 在圈内超时，防守方获得最低胜利奖励
+        reward_in_spot = torch.full_like(dist_a1_to_spot_timeout, h_params['R_WIN_MIN'])
+        
+        # 情况2: 在圈外超时，奖励随距离增加而增加，从R_WIN_MIN到R_TIMEOUT_WIN
+        # 我们定义一个最大距离，比如场地width，作为奖励达到最大的点
+        max_dist = h_params['W']
+        containment_quality = torch.clamp((dist_a1_to_spot_timeout - h_params['R_spot']) / (max_dist - h_params['R_spot']), 0.0, 1.0)
+        reward_out_spot = h_params['R_WIN_MIN'] + (h_params['R_TIMEOUT_WIN'] - h_params['R_WIN_MIN']) * containment_quality
+
+        dynamic_timeout_reward = torch.where(is_in_spot_timeout, reward_in_spot, reward_out_spot)
+        
+        # 分配零和奖励
+        terminal_rewards[time_up, :n_attackers] = (-dynamic_timeout_reward / n_attackers).unsqueeze(-1)
+        terminal_rewards[time_up, n_attackers:] = (dynamic_timeout_reward / n_defenders).unsqueeze(-1)
+        
         reason_code[time_up] = 12
         dones_out |= time_up
     
