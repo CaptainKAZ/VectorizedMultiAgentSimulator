@@ -109,8 +109,8 @@ class Scenario(BaseScenario):
 
         # --- 2.2 犯规判定 ---
         self.h_params["v_foul_threshold"] = kwargs.get("v_foul_threshold", 0.4)        # 判定为碰撞犯规的最小相对速度
-        self.h_params["wall_collision_frames"] = kwargs.get("wall_collision_frames", 20.0) # 持续撞墙导致回合结束的帧数阈值
-        self.h_params["max_time_over_midline"] = kwargs.get("max_time_over_midline", 20.0) # 防守方允许越过中线的最大帧数
+        self.h_params["wall_collision_frames"] = kwargs.get("wall_collision_frames", 5.0) # 持续撞墙导致回合结束的帧数阈值
+        self.h_params["max_time_over_midline"] = kwargs.get("max_time_over_midline", 5.0) # 防守方允许越过中线的最大帧数
 
         # --- 2.3 胜负判定 ---
         self.h_params["win_condition_block_threshold"] = kwargs.get("win_condition_block_threshold", 0.5) # 判定投篮被成功封盖的封盖因子阈值，大于此值则投篮失败
@@ -119,17 +119,17 @@ class Scenario(BaseScenario):
         # =================================================================================
         # 3. 终局奖励设定 (Terminal Rewards)
         # =================================================================================
-        self.h_params["R_WIN_MIN"] = kwargs.get("R_WIN_MIN", 2000.0) # 在边缘出手胜利
+        self.h_params["R_WIN_MIN"] = kwargs.get("R_WIN_MIN", 5000.0) # 在边缘出手胜利
         self.h_params["R_WIN_MAX"] = kwargs.get("R_WIN_MAX", 10000.0) # 在中心出手时大胜
         self.h_params["R_TIMEOUT_WIN"] = kwargs.get("R_TIMEOUT_WIN", 12000.0) # 防守方通过超时获胜的“完美胜利”奖励
-        self.h_params["R_VIOLATION"] = kwargs.get("R_VIOLATION", 15000.0) # 违反规则的惩罚
+        self.h_params["R_VIOLATION"] = kwargs.get("R_VIOLATION", 30000.0) # 违反规则的惩罚
 
         # =================================================================================
         # 4. 稠密奖励与行为塑造 (Dense Rewards & Behavior Shaping)
         # =================================================================================
 
         # --- 4.1 通用项 (General for All Agents) ---
-        self.dense_reward_factor = kwargs.get("dense_reward_factor", 0.01) # 稠密奖励整体缩放系数
+        self.dense_reward_factor = kwargs.get("dense_reward_factor", 0.05) # 稠密奖励整体缩放系数
         self.h_params["oob_penalty"] = kwargs.get("oob_penalty", -3000.0) # 出界惩罚系数
         self.h_params["oob_margin"] = kwargs.get("oob_margin", 0.05) # 出界惩罚的平滑边界宽度
         self.h_params["k_u_penalty_general"] = kwargs.get("k_u_penalty_general", 0.1) # 动作指令大小的基础惩罚系数
