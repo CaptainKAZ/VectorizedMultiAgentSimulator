@@ -315,7 +315,7 @@ def calculate_rewards_and_dones_jit(
     # 2.2.3 刹车使用惩罚 (Brake Usage Penalty)
     excess_brake_magnitude = torch.clamp(raw_breaks - penalty_threshold, min=0.0)
     braking_limit_panlty = h_params['k_action_access_max_penalty'] * (excess_brake_magnitude / (penalty_range + 1e-6))
-    dense_reward -= (h_params["k_brake_usage_penalty"] * is_braking.float() + braking_limit_panlty)
+    dense_reward -= (h_params["k_brake_usage_penalty"] * torch.clamp(raw_breaks, min=0.0) + braking_limit_panlty)
     
     # 2.2.4 矛盾动作惩罚 (Conflicting Action Penalty): 惩罚同时输出方向指令和刹车指令
     conflicting_action_penalty = h_params['k_conflicting_action_penalty'] * raw_u_norm * is_braking.float()

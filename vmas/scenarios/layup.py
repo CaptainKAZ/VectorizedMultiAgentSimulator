@@ -417,43 +417,55 @@ class Scenario(BaseScenario):
 
     # @timer
     def process_action(self, agent: Agent):
+        """
+        处理智能体的动作输入，将其转换为符合物理约束的最终速度。
+        该版本集成了期望速度限制、动态刹车、动作死区和防过冲机制。
+        """
         agent_idx = self.world.agents.index(agent)
         
-        # 1. 分离速度和刹车信号 (刹车信号范围现在是 [-5, 5])
-        target_vel = agent.action.u[:, :2]
-        brake_signal = agent.action.u[:, 2]
+        raw_target_vel, brake_signal = agent.action.u[:, :2], agent.action.u[:, 2]
 
-        # 2. 实现刹车逻辑，【关键修改点】
-        # 当刹车信号 > 0 时，我们判定AI想要刹车
-        is_braking = brake_signal > 0
-        final_target_vel = torch.where(
-            is_braking.unsqueeze(-1),
-            torch.zeros_like(target_vel),
-            target_vel
-        )
-
-        # 3. 保存原始动作
-        self.raw_actions[:, agent_idx, :] = target_vel.clone()
+        # (可选) 记录原始动作
+        self.raw_actions[:, agent_idx, :] = raw_target_vel.clone()
         self.raw_breaks[:, agent_idx] = brake_signal.clone()
 
-        # 4. 处理开局延迟
+        # 1. 限制智能体的期望速度意图
+        target_vel = TorchUtils.clamp_with_norm(raw_target_vel, agent.u_range)
+
+        # 2. 计算期望的推进加速度
+        propulsive_a_requested = (target_vel - agent.state.vel) / self.world.dt
+
+        # 3. 计算有上限的刹车减速度
+        current_velocity = agent.state.vel
+        current_speed = torch.linalg.vector_norm(current_velocity, dim=1)
+        
+        desired_braking_magnitude = (torch.clamp(brake_signal, min=0) / 5.0) * self.h_params["a_max"]
+        max_physical_braking_magnitude = current_speed / self.world.dt
+        effective_braking_magnitude = torch.min(desired_braking_magnitude, max_physical_braking_magnitude)
+        
+        velocity_direction = current_velocity / (current_speed.unsqueeze(-1) + 1e-6)
+        braking_a = -velocity_direction * effective_braking_magnitude.unsqueeze(-1)
+
+        # 4. 计算净请求加速度
+        net_requested_a = propulsive_a_requested + braking_a
+
+        # 5. 应用开局延迟逻辑
         if agent == self.a1:
-            is_delayed = self.delay_counter > 0
-            final_target_vel[is_delayed] = 0.0
+            is_delayed_mask = self.delay_counter > 0
+            net_requested_a[is_delayed_mask] = 0.0
 
-        # 5. 实现动作死区
-        action_norm = torch.linalg.vector_norm(final_target_vel, dim=1)
-        final_target_vel[action_norm < 0.1] = 0.0
+        # 6. 应用动作死区
+        action_norm = torch.linalg.vector_norm(net_requested_a, dim=1)
+        net_requested_a[action_norm < 0.1] = 0.0
         
-        # 6. 后续所有操作都基于我们最终计算出的 final_target_vel
-        clamped_vel = TorchUtils.clamp_with_norm(final_target_vel, agent.u_range)
-        
-        requested_a = (clamped_vel - agent.state.vel) / self.world.dt
-        self.requested_accelerations[:, agent_idx, :] = requested_a
-        achievable_a = TorchUtils.clamp_with_norm(requested_a, self.h_params["a_max"])
+        # 7. 将最终请求的加速度限制在物理极限内
+        achievable_a = TorchUtils.clamp_with_norm(net_requested_a, self.h_params["a_max"])
+        self.requested_accelerations[:, agent_idx, :] = achievable_a
 
+        # 8. 根据可实现的加速度更新智能体的最终速度
         agent.action.u = agent.state.vel + achievable_a * self.world.dt
         
+        # 9. 调用控制器处理最终的力
         agent.controller.process_force()
 
     # @timer
