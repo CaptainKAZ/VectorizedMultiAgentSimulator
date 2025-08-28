@@ -235,7 +235,7 @@ class Scenario(BaseScenario):
         for i in range(self.n_agents):
             is_attacker = i < self.n_attackers
             agent = Agent(
-                name=f"agent_{i}",
+                name=f"attacker_{i}" if is_attacker else f"defender_{i-self.n_attackers}",
                 collide=True,
                 movable=True,
                 rotatable=False,
@@ -730,7 +730,7 @@ class Scenario(BaseScenario):
     # @timer
     def observation(self, agent: Agent):
         agent_idx = self.world.agents.index(agent)
-        agent_id_encoding = self.agent_id_encoding_map[agent_idx].expand(self.world.batch_dim, -1)
+        # agent_id_encoding = self.agent_id_encoding_map[agent_idx].expand(self.world.batch_dim, -1)
         is_attacker = agent_idx < self.n_attackers
 
         # --- 1. 获取所有原始状态 ---
@@ -790,7 +790,7 @@ class Scenario(BaseScenario):
 
         # --- 4. 拼接成最终的观察向量 ---
         obs = torch.cat([
-            agent_id_encoding,  # [3]
+            # agent_id_encoding,  # [3]
             self_obs,           # [4]
             teammate_obs,       # [4]
             opp1_obs,           # [4]
