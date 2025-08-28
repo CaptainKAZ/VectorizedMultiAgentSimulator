@@ -175,71 +175,94 @@ def calculate_rewards_and_dones_jit(
         dones_out |= time_up
     
     # --- 条件3: 碰撞犯规 (Foul) ---
+    # 1. 找出所有满足犯规条件的碰撞对 (is_foul 的形状为 [B, N, N])
     is_foul = collision_matrix & (vel_diffs_norm > h_params['v_foul_threshold']) & ~dones_out.view(-1, 1, 1)
-    if torch.triu(is_foul, diagonal=1).any():
-        foul_indices = torch.triu(is_foul, diagonal=1).nonzero()
-        b_idx, i_idx, j_idx = foul_indices.T
-        
-        agent_i_p_vel = p_vels[b_idx, i_idx]
-        pos_rel = all_pos[b_idx, j_idx] - all_pos[b_idx, i_idx]
-        vel_rel_on_pos = torch.einsum("bd,bd->b", agent_i_p_vel, pos_rel)
-        i_is_active = vel_rel_on_pos > 0
-        active_indices = torch.where(i_is_active, i_idx, j_idx)
-        
-        active_is_attacker = active_indices < n_attackers
-        passive_indices = torch.where(i_is_active, j_idx, i_idx)
-        is_friendly_fire = (active_is_attacker == (passive_indices < n_attackers))
-        
-        foul_rewards = torch.zeros_like(terminal_rewards)
-        
-        # 情况A: 敌对犯规 (零和) - 使用固定的最大奖励值
-        opp_foul_mask = ~is_friendly_fire
-        if torch.any(opp_foul_mask):
-            opp_b = b_idx[opp_foul_mask]
-            opp_active = active_indices[opp_foul_mask]
-            active_is_defender = opp_active >= n_attackers
-            
-            att_win_mask = active_is_defender
-            if torch.any(att_win_mask):
-                b_idx_att_win = opp_b[att_win_mask]
-                attacker_win_this_step[b_idx_att_win] = True
-                reason_code[b_idx_att_win] = 2
-                foul_rewards[b_idx_att_win, :n_attackers] = h_params['R_WIN_MAX'] / n_attackers
-                foul_rewards[b_idx_att_win, n_attackers:] = -h_params['R_WIN_MAX'] / n_defenders
-            
-            def_win_mask = ~active_is_defender
-            if torch.any(def_win_mask):
-                b_idx_def_win = opp_b[def_win_mask]
-                reason_code[b_idx_def_win] = 13
-                foul_rewards[b_idx_def_win, n_attackers:] = h_params['R_WIN_MAX'] / n_defenders
-                foul_rewards[b_idx_def_win, :n_attackers] = -h_params['R_WIN_MAX'] / n_attackers
 
-        # 情况B: 友军误伤 (规则惩罚)
-        ff_foul_mask = is_friendly_fire
-        if torch.any(ff_foul_mask):
-            ff_b = b_idx[ff_foul_mask]
-            ff_active = active_indices[ff_foul_mask]
-            ff_passive = passive_indices[ff_foul_mask]
+    # 2. 检查是否有任何环境中发生了犯规
+    if is_foul.any():
+        # 3. 为了避免重复计算(i,j)和(j,i)，我们只看上三角部分
+        is_foul = torch.triu(is_foul, diagonal=1)
 
-            # 误伤，犯规双方都受罚 (使用 index_add_ 修复)
-            num_ff_fouls = ff_b.shape[0]
-            ff_rewards_to_add = torch.zeros(num_ff_fouls, n_agents, device=device)
-            ff_row_indices = torch.arange(num_ff_fouls, device=device)
+        # 4. 获取这些犯规对的相对速度，非犯规对的速度设为0
+        #    这样我们就可以安全地在整个矩阵中寻找最大值
+        foul_velocities = vel_diffs_norm * is_foul.float()
 
-            # Assign the penalty to both agents involved in the collision
-            ff_rewards_to_add[ff_row_indices, ff_active] = -h_params['R_VIOLATION']
-            ff_rewards_to_add[ff_row_indices, ff_passive] = -h_params['R_VIOLATION']
+        # 5. 在每个环境中，找出速度最大的犯规对
+        #    首先将每个环境的 [N, N] 矩阵展平为一维向量 [N*N]
+        flat_foul_velocities = foul_velocities.view(batch_dim, -1)
+        #    然后在一维向量里寻找最大速度和对应的索引
+        max_vels, flat_indices = torch.max(flat_foul_velocities, dim=1)
+
+        # 6. 只处理那些实际发生了犯规的环境 (即最大速度 > 0)
+        envs_with_foul_mask = max_vels > 0
+        if envs_with_foul_mask.any():
+            b_idx = envs_with_foul_mask.nonzero().squeeze(-1)
             
-            # Add the penalties to the main foul rewards tensor
-            foul_rewards.index_add_(0, ff_b, ff_rewards_to_add)
+            # 7. 将一维索引转换回二维的智能体索引 (i, j)
+            #    只对那些有犯规的环境进行转换
+            agent_indices_flat = flat_indices[b_idx]
+            i_idx = agent_indices_flat // n_agents
+            j_idx = agent_indices_flat % n_agents
 
-            # Update reason codes (this logic is unchanged)
-            ff_active_is_attacker = active_is_attacker[ff_foul_mask]
-            reason_code[ff_b[~ff_active_is_attacker]] = 5 # 对手友军误伤
-            reason_code[ff_b[ff_active_is_attacker]] = 15 # 己方友军误伤
+            # 8. --- 后续的判罚逻辑与我们上次修改的非零和版本完全相同 ---
+            #    唯一的区别是，现在 b_idx, i_idx, j_idx 只包含每个环境中“最严重”的那一次犯规
+            agent_i_p_vel = p_vels[b_idx, i_idx]
+            pos_rel = all_pos[b_idx, j_idx] - all_pos[b_idx, i_idx]
+            vel_rel_on_pos = torch.einsum("bd,bd->b", agent_i_p_vel, pos_rel)
+            i_is_active = vel_rel_on_pos > 0
+            active_indices = torch.where(i_is_active, i_idx, j_idx)
             
-        terminal_rewards += foul_rewards
-        dones_out[b_idx] = True
+            active_is_attacker = active_indices < n_attackers
+            passive_indices = torch.where(i_is_active, j_idx, i_idx)
+            is_friendly_fire = (active_is_attacker == (passive_indices < n_attackers))
+            
+            foul_rewards = torch.zeros_like(terminal_rewards)
+            
+            # 情况A: 敌对犯规 (非零和)
+            opp_foul_mask = ~is_friendly_fire
+            if torch.any(opp_foul_mask):
+                # 注意：这里的b_idx, active_indices等都已经是筛选过的了，所以可以直接用
+                opp_b = b_idx[opp_foul_mask]
+                opp_active = active_indices[opp_foul_mask]
+                active_is_defender = opp_active >= n_attackers
+                
+                att_win_mask = active_is_defender
+                if torch.any(att_win_mask):
+                    b_idx_att_win = opp_b[att_win_mask]
+                    attacker_win_this_step[b_idx_att_win] = True
+                    reason_code[b_idx_att_win] = 2
+                    foul_rewards[b_idx_att_win, :n_attackers] = h_params['R_WIN_MIN'] / n_attackers
+                    foul_rewards[b_idx_att_win, n_attackers:] = -h_params['R_VIOLATION'] / n_defenders
+                
+                def_win_mask = ~active_is_defender
+                if torch.any(def_win_mask):
+                    b_idx_def_win = opp_b[def_win_mask]
+                    reason_code[b_idx_def_win] = 13
+                    foul_rewards[b_idx_def_win, n_attackers:] = h_params['R_WIN_MIN'] / n_defenders
+                    foul_rewards[b_idx_def_win, :n_attackers] = -h_params['R_VIOLATION'] / n_attackers
+
+            # 情况B: 友军误伤
+            ff_foul_mask = is_friendly_fire
+            if torch.any(ff_foul_mask):
+                ff_b = b_idx[ff_foul_mask]
+                ff_active = active_indices[ff_foul_mask]
+                ff_passive = passive_indices[ff_foul_mask]
+
+                num_ff_fouls = ff_b.shape[0]
+                ff_rewards_to_add = torch.zeros(num_ff_fouls, n_agents, device=device)
+                ff_row_indices = torch.arange(num_ff_fouls, device=device)
+
+                ff_rewards_to_add[ff_row_indices, ff_active] = -h_params['R_VIOLATION']
+                ff_rewards_to_add[ff_row_indices, ff_passive] = -h_params['R_VIOLATION']
+                
+                foul_rewards.index_add_(0, ff_b, ff_rewards_to_add)
+
+                ff_active_is_attacker = active_is_attacker[ff_foul_mask]
+                reason_code[ff_b[~ff_active_is_attacker]] = 5 
+                reason_code[ff_b[ff_active_is_attacker]] = 15
+                
+            terminal_rewards += foul_rewards
+            dones_out[b_idx] = True
 
     # --- 条件4: 持续撞墙导致回合结束 (Wall Collision Timeout) ---
     is_wall_timeout_per_agent = (wall_collision_counters >= h_params['wall_collision_frames'])

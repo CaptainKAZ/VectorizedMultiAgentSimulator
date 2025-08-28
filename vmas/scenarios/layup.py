@@ -286,8 +286,8 @@ class Scenario(BaseScenario):
         self.is_in_spot_a1 = torch.zeros(batch_dim,device=device)
 
 
-        # self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit, mode="max-autotune")
-        self.jitted_reward_calculator = calculate_rewards_and_dones_jit
+        self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit)
+        # self.jitted_reward_calculator = calculate_rewards_and_dones_jit
 
         self.reward_hist = {}
 
@@ -587,33 +587,43 @@ class Scenario(BaseScenario):
     def get_global_state(self):
         """
         获取环境的全局状态，适配 Attention Critic 的输入格式。
-        返回一个按照实体顺序组织特征的扁平化张量。
+        (已更新为归一化版本)
         
         返回:
-            torch.Tensor: 全局状态张量，形状为 [B, D]，
+            torch.Tensor: 归一化后的全局状态张量，形状为 [B, D]，
                         其中 D 是全局状态的总维度。
         """
-        # 1. 获取所有智能体的位置和速度
-        # all_pos/all_vel 的形状为 [B, N, 2], N=4
+        # --- 1. 定义归一化所需的最大值 ---
+        max_x = self.h_params["W"] / 2
+        max_y = self.h_params["L"] / 2
+        max_v = self.h_params["v_max"]
+        device = self.world.device
+        pos_divisor = torch.tensor([max_x, max_y], device=device)
+
+        # --- 2. 获取所有原始状态并进行归一化 ---
+        
+        # 归一化所有智能体的位置和速度
         all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)
         all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
-
+        norm_all_pos = all_pos / pos_divisor
+        norm_all_vel = all_vel / max_v
+        
         # [B, N, 2] 和 [B, N, 2] -> [B, N, 4]
-        # 这样，每个智能体的4个特征（pos_x, pos_y, vel_x, vel_y）就在一起了
-        agent_states = torch.cat([all_pos, all_vel], dim=-1)
+        agent_states = torch.cat([norm_all_pos, norm_all_vel], dim=-1)
 
-        # 3. 将智能体状态张量扁平化
-        # [B, N, 4] -> [B, N * 4] = [B, 16]
+        # 扁平化智能体状态张量 [B, N, 4] -> [B, N * 4] = [B, 16]
         batch_dim = self.world.batch_dim
         flat_agent_states = agent_states.view(batch_dim, -1)
 
-        # 4. 获取其他关键状态信息 (这部分不变)
-        spot_pos = self.spot_center.state.pos      # 形状: [B, 2]
-        is_in_spot_a1_obs = self.is_in_spot_a1.unsqueeze(-1)# 形状: [B, 1]
-        basket_pos = self.basket.state.pos        # 形状: [B, 2]
-        time_obs = self.t_remaining / self.h_params["t_limit"] # 形状: [B, 1]
+        # 归一化其他关键状态信息
+        spot_pos = self.spot_center.state.pos / pos_divisor
+        basket_pos = self.basket.state.pos / pos_divisor
+        
+        # 这些已经是归一化或无需归一化的
+        is_in_spot_a1_obs = self.is_in_spot_a1.unsqueeze(-1)
+        time_obs = self.t_remaining / self.h_params["t_limit"]
 
-        # 顺序: 4个agent, 1个spot, 1个basket, 1个time
+        # --- 3. 拼接所有归一化后的特征 ---
         global_state = torch.cat([
             flat_agent_states,  # 16维
             spot_pos,           # 2维
@@ -622,7 +632,6 @@ class Scenario(BaseScenario):
             time_obs,           # 1维
         ], dim=-1)
 
-        # 返回的张量形状仍然是 [B, 21]，但内部的数据排列顺序已经改变
         return global_state.clone()
         
 
@@ -642,84 +651,78 @@ class Scenario(BaseScenario):
     def get_all_critic_obs(self):
         """
         一次性计算并返回所有智能体的、以自我为中心的 Critic 观测矩阵。
+        (已更新为归一化版本)
         特征顺序: one-hot, self, teammate, opp1, opp2, spot, in_spot, basket, time
         
         返回:
-            torch.Tensor: 所有智能体的 Critic 观测，
+            torch.Tensor: 所有智能体的归一化 Critic 观测，
                         形状为 [B, N, D_critic_obs]。
         """
         batch_dim = self.world.batch_dim
         n_agents = len(self.world.agents)
-        n_attackers = 2 # 根据您的描述，idx < 2 的是 attacker
+        n_attackers = 2
 
-        # --- 1. 预计算所有基础组件 (在循环外执行) ---
+        # --- 1. 定义归一化所需的最大值 ---
+        max_x = self.h_params["W"] / 2
+        max_y = self.h_params["L"] / 2
+        max_v = self.h_params["v_max"]
+        device = self.world.device
+        pos_divisor = torch.tensor([max_x, max_y], device=device)
 
-        # a) 所有智能体的状态 (pos+vel)
-        # all_pos/all_vel 的形状为 [B, N, 2]
-        all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)
-        all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
+        # --- 2. 预计算所有基础组件 (在循环外执行) ---
+
+        # a) 归一化所有智能体的状态 (pos+vel)
+        all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1) / pos_divisor
+        all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1) / max_v
         # all_agent_states 形状: [B, N, 4]
         all_agent_states = torch.cat([all_pos, all_vel], dim=-1)
 
-        # b) 所有环境状态
-        spot_pos = self.spot_center.state.pos          # [B, 2]
-        is_in_spot_a1_obs = self.is_in_spot_a1.unsqueeze(-1) # [B, 1]
-        basket_pos = self.basket.state.pos             # [B, 2]
-        time_obs = self.t_remaining / self.h_params["t_limit"] # [B, 1]
+        # b) 归一化所有环境状态
+        spot_pos = self.spot_center.state.pos / pos_divisor
+        basket_pos = self.basket.state.pos / pos_divisor
+        # 这两个已经是归一化或无需归一化的
+        is_in_spot_a1_obs = self.is_in_spot_a1.unsqueeze(-1)
+        time_obs = self.t_remaining / self.h_params["t_limit"]
+        
         # env_state_part 形状: [B, 6]
         env_state_part = torch.cat([
             spot_pos, is_in_spot_a1_obs, basket_pos, time_obs
         ], dim=-1)
 
-        # c) 所有智能体的ID编码
-        # all_encodings 形状: [N, D_onehot] e.g., [4, 3]
+        # c) 所有智能体的ID编码 (无需归一化)
         all_encodings = torch.stack(
             [self.agent_id_encoding_map[i] for i in range(n_agents)], 
             dim=0
         )
-        # 扩展以匹配 batch 维度 -> [B, N, D_onehot]
         all_encodings_expanded = all_encodings.unsqueeze(0).expand(batch_dim, -1, -1)
 
-        # --- 2. 遍历每个智能体，构建其专属观测 ---
+        # --- 3. 遍历每个智能体，构建其专属观测 ---
         obs_per_agent = []
         for agent_idx in range(n_agents):
-            # a) 确定 self, teammate, opp1, opp2 的索引
             is_attacker = agent_idx < n_attackers
             if is_attacker:
-                # 当前 agent 是 attacker
-                teammate_idx = 1 - agent_idx # 0 -> 1, 1 -> 0
+                teammate_idx = 1 - agent_idx
                 opp1_idx, opp2_idx = 2, 3
             else:
-                # 当前 agent 是 defender
-                # 2 -> 3, 3 -> 2
                 teammate_idx = 1 - (agent_idx - n_attackers) + n_attackers
                 opp1_idx, opp2_idx = 0, 1
             
-            # b) 根据索引顺序从 all_agent_states 中提取数据
             order_indices = [agent_idx, teammate_idx, opp1_idx, opp2_idx]
-            
-            # advanced indexing: 从 [B, N, 4] 中按顺序取出4个智能体的状态
-            # 结果形状: [B, 4, 4] (4个智能体, 每个4个特征)
             ordered_agent_states = all_agent_states[:, order_indices, :]
-            
-            # 扁平化智能体状态部分 -> [B, 16]
             flat_ordered_agent_states = ordered_agent_states.reshape(batch_dim, -1)
 
-            # c) 获取当前智能体的 one-hot 编码 -> [B, D_onehot]
             current_one_hot = all_encodings_expanded[:, agent_idx, :]
 
-            # d) 拼接成最终的观测向量
-            # 顺序: one-hot, self, teammate, opp1, opp2, spot, in_spot, basket, time
+            # 拼接成最终的观测向量
             final_obs_for_agent = torch.cat([
                 current_one_hot,
-                flat_ordered_agent_states, # 已经包含了 self, teammate, opps
+                flat_ordered_agent_states,
                 env_state_part
             ], dim=-1)
 
             obs_per_agent.append(final_obs_for_agent)
 
-        # --- 3. 将所有智能体的观测堆叠成一个最终矩阵 ---
-        # list of [B, D_obs] -> [B, N, D_obs]
+        # --- 4. 将所有智能体的观测堆叠成一个最终矩阵 ---
         final_matrix = torch.stack(obs_per_agent, dim=1)
 
         return final_matrix.clone()
@@ -730,11 +733,10 @@ class Scenario(BaseScenario):
         agent_id_encoding = self.agent_id_encoding_map[agent_idx].expand(self.world.batch_dim, -1)
         is_attacker = agent_idx < self.n_attackers
 
-        # --- 1. 为每个逻辑实体创建独立的、未填充的张量 ---
+        # --- 1. 获取所有原始状态 ---
         self_pos = agent.state.pos
         self_vel = agent.state.vel
         
-        # ... (获取队友和对手信息的代码不变) ...
         if is_attacker:
             teammate_idx = 1 - agent_idx
             opp1_idx, opp2_idx = self.n_attackers, self.n_attackers + 1
@@ -745,36 +747,58 @@ class Scenario(BaseScenario):
         teammate = self.world.agents[teammate_idx]
         opp1 = self.world.agents[opp1_idx]
         opp2 = self.world.agents[opp2_idx]
-
-        self_obs = torch.cat([self_pos, self_vel], dim=-1)
-        teammate_obs = torch.cat([teammate.state.pos - self_pos, self.p_vels[:, teammate_idx] - self_vel], dim=-1)
-        opp1_obs = torch.cat([opp1.state.pos - self_pos, self.p_vels[:, opp1_idx] - self_vel], dim=-1)
-        opp2_obs = torch.cat([opp2.state.pos - self_pos, self.p_vels[:, opp2_idx] - self_vel], dim=-1)
+        
+        # 提取需要归一化的原始向量
+        teammate_rel_pos = teammate.state.pos - self_pos
+        teammate_rel_vel = self.p_vels[:, teammate_idx] - self_vel
+        opp1_rel_pos = opp1.state.pos - self_pos
+        opp1_rel_vel = self.p_vels[:, opp1_idx] - self_vel
+        opp2_rel_pos = opp2.state.pos - self_pos
+        opp2_rel_vel = self.p_vels[:, opp2_idx] - self_vel
         spot_rel_pos = self.spot_center.state.pos - self_pos
         basket_rel_pos = self.basket.state.pos - self_pos
+        
+        # --- 2. 定义归一化所需的最大值 ---
+        max_pos_x = self.h_params["W"] / 2
+        max_pos_y = self.h_params["L"] / 2
+        max_vel = self.h_params["v_max"]
+        device = self.world.device
+        
+        # 绝对坐标和速度的归一化除数
+        abs_pos_divisor = torch.tensor([max_pos_x, max_pos_y], device=device)
+        # 相对坐标的最大范围是绝对坐标的两倍
+        rel_pos_divisor = torch.tensor([2 * max_pos_x, 2 * max_pos_y], device=device)
+        # 相对速度的最大范围是绝对速度的两倍
+        rel_vel_divisor = 2 * max_vel
+
+        # --- 3. 对所有观察值进行归一化 ---
+        self_obs = torch.cat([self_pos / abs_pos_divisor, self_vel / max_vel], dim=-1)
+        teammate_obs = torch.cat([teammate_rel_pos / rel_pos_divisor, teammate_rel_vel / rel_vel_divisor], dim=-1)
+        opp1_obs = torch.cat([opp1_rel_pos / rel_pos_divisor, opp1_rel_vel / rel_vel_divisor], dim=-1)
+        opp2_obs = torch.cat([opp2_rel_pos / rel_pos_divisor, opp2_rel_vel / rel_vel_divisor], dim=-1)
+        norm_basket_rel_pos = basket_rel_pos / rel_pos_divisor
+        
+        # 攻击方和防守方看到的信息不同
+        if is_attacker:
+            spot_obs = spot_rel_pos / rel_pos_divisor
+            is_in_spot_a1 = self.is_in_spot_a1.unsqueeze(-1)
+        else:
+            spot_obs = torch.zeros_like(spot_rel_pos) # 防守方不知道投篮点
+            is_in_spot_a1 = torch.zeros_like(self.is_in_spot_a1.unsqueeze(-1))
+            
         time_obs = self.t_remaining / self.h_params["t_limit"]
 
-        # --- 2. 对每个实体独立填充到4维(现在不填充了) ---
-        # F.pad(tensor, (左填充, 右填充))
-        if is_attacker:
-            spot_obs = spot_rel_pos
-            is_in_spot_a1 = self.is_in_spot_a1.unsqueeze(-1)
-            
-        else:
-            spot_obs = torch.zeros_like(spot_rel_pos) # 防守方不知道投篮点，用全0填充
-            is_in_spot_a1 = torch.zeros_like(self.is_in_spot_a1.unsqueeze(-1))
-
-        # --- 3. 将所有维度统一的实体拼接成一个扁平的28维向量 ---
+        # --- 4. 拼接成最终的观察向量 ---
         obs = torch.cat([
-            agent_id_encoding,
-            self_obs,
-            teammate_obs,
-            opp1_obs,
-            opp2_obs,
-            spot_obs,
-            is_in_spot_a1,
-            basket_rel_pos,
-            time_obs,
+            agent_id_encoding,  # [3]
+            self_obs,           # [4]
+            teammate_obs,       # [4]
+            opp1_obs,           # [4]
+            opp2_obs,           # [4]
+            spot_obs,           # [2]
+            is_in_spot_a1,      # [1]
+            norm_basket_rel_pos,# [2]
+            time_obs,           # [1]
         ], dim=-1)
     
         return obs.clone()
