@@ -91,7 +91,7 @@ class Scenario(BaseScenario):
         self.h_params["t_limit"] = kwargs.get("t_limit", 15.0) # 每回合最大时长（秒）
         self.dt = kwargs.get("dt", 0.1) # 物理仿真的时间步长
         self.spawn_area_depth = kwargs.get("spawn_area_depth", 1.0) # 防守方和a2生成位置的宽度
-        self.start_delay_frames = kwargs.get("start_delay_frames", 10) # 回合开始时，智能体需要等待的帧数，期间不响应动作
+        self.start_delay_frames = kwargs.get("start_delay_frames", 0) # 回合开始时，智能体需要等待的帧数，期间不响应动作
 
         # --- 智能体物理属性 ---
         self.h_params["agent_radius"] = kwargs.get("agent_radius", 0.3) # 智能体半径，用于碰撞检测
@@ -103,8 +103,8 @@ class Scenario(BaseScenario):
         # 2. 回合终止条件 (Episode Termination Conditions)
         # =================================================================================
         # --- 2.1 投篮判定 ---
-        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.1) # 触发投篮所允许的最大速度
-        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.4)  # 触发投篮所允许的最大动作指令模长
+        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.2) # 触发投篮所允许的最大速度
+        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.6)  # 触发投篮所允许的最大动作指令模长
         self.h_params["shot_still_frames"] = kwargs.get("shot_still_frames", 10)   # 触发投篮需要在投篮区内保持静止的帧数
 
         # --- 2.2 犯规判定 ---
@@ -129,7 +129,7 @@ class Scenario(BaseScenario):
         # =================================================================================
 
         # --- 4.1 通用项 (General for All Agents) ---
-        self.dense_reward_factor = kwargs.get("dense_reward_factor", 0.05) # 稠密奖励整体缩放系数
+        self.dense_reward_factor = kwargs.get("dense_reward_factor", 0.08) # 稠密奖励整体缩放系数
         self.h_params["oob_penalty"] = kwargs.get("oob_penalty", -3000.0) # 出界惩罚系数
         self.h_params["oob_margin"] = kwargs.get("oob_margin", 0.05) # 出界惩罚的平滑边界宽度
         self.h_params["k_u_penalty_general"] = kwargs.get("k_u_penalty_general", 0.1) # 动作指令大小的基础惩罚系数

@@ -551,7 +551,7 @@ def calculate_rewards_and_dones_jit(
     #    - 新的理想位置 y 坐标 = 防守方当前的 y 坐标
     n_defenders = defender_pos.shape[1]
     ideal_pos_x_init = a1_pos[:, 0:1].unsqueeze(1).expand(-1, n_defenders, -1)
-    ideal_pos_y_init = torch.full_like(ideal_pos_x_init, h_params['agent_radius'])
+    ideal_pos_y_init = torch.full_like(ideal_pos_x_init, 2 * h_params['agent_radius'])
     ideal_pos_init = torch.cat([ideal_pos_x_init, ideal_pos_y_init], dim=-1)
     # 定义条件：A1是否未越过中线
     a1_cross_midline = (a1_pos[:, 1] <= 0).view(batch_dim, 1, 1)
