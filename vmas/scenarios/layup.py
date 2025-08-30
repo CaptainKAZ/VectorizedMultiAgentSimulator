@@ -85,7 +85,7 @@ class Scenario(BaseScenario):
         # --- 场地属性 ---
         self.h_params["W"] = kwargs.get("W", 8.0)  # 场地宽度 (x-axis)
         self.h_params["L"] = kwargs.get("L", 15.0) # 场地长度 (y-axis)
-        self.h_params["R_spot"] = kwargs.get("R_spot", 1.2) # 篮下可投篮的圆形区域半径
+        self.h_params["R_spot"] = kwargs.get("R_spot", 1.0) # 篮下可投篮的圆形区域半径
 
         # --- 游戏规则 ---
         self.h_params["t_limit"] = kwargs.get("t_limit", 15.0) # 每回合最大时长（秒）
@@ -109,8 +109,8 @@ class Scenario(BaseScenario):
 
         # --- 2.2 犯规判定 ---
         self.h_params["v_foul_threshold"] = kwargs.get("v_foul_threshold", 0.4)        # 判定为碰撞犯规的最小相对速度
-        self.h_params["wall_collision_frames"] = kwargs.get("wall_collision_frames", 20.0) # 持续撞墙导致回合结束的帧数阈值
-        self.h_params["max_time_over_midline"] = kwargs.get("max_time_over_midline", 20.0) # 防守方允许越过中线的最大帧数
+        self.h_params["wall_collision_frames"] = kwargs.get("wall_collision_frames", 5.0) # 持续撞墙导致回合结束的帧数阈值
+        self.h_params["max_time_over_midline"] = kwargs.get("max_time_over_midline", 5.0) # 防守方允许越过中线的最大帧数
 
         # --- 2.3 胜负判定 ---
         self.h_params["win_condition_block_threshold"] = kwargs.get("win_condition_block_threshold", 0.5) # 判定投篮被成功封盖的封盖因子阈值，大于此值则投篮失败
@@ -141,16 +141,17 @@ class Scenario(BaseScenario):
         # --- 3.3 犯规 ---
         self.h_params["R_foul"] = kwargs.get("R_foul", 6000.0) # 碰撞犯规的基础奖励/惩罚值
         self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 1000.0) # 碰撞犯规时，根据相对速度大小调整惩罚的系数
-        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.8) # 犯规发生时，被犯规方队友获得的奖励比例
-        self.h_params["R_wall_collision_penalty"] = kwargs.get("R_wall_collision_penalty", -11000.0) # 因持续撞墙导致回合结束的惩罚
-        self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 12000.0) # 防守方因持续越线导致回合结束的惩罚
+        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.7) # 犯规发生时，被犯规方队友获得的奖励比例
+        self.h_params["R_wall_collision_penalty"] = kwargs.get("R_wall_collision_penalty", -40000.0) # 因持续撞墙导致回合结束的惩罚
+        self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 40000.0) # 防守方因持续越线导致回合结束的惩罚
 
         # --- 3.4 投篮失败 (防守方终局奖励) ---
-        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 3000.0) # 防守方因封盖贡献获得的奖励系数
+        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 4000.0) # 防守方因封盖贡献获得的奖励系数
         self.h_params["k_def_force_reward"] = kwargs.get("k_def_force_reward", 2000.0) # 防守方因迫使A1远离篮筐投篮获得的奖励系数
         self.h_params["k_def_pos_reward"] = kwargs.get("k_def_pos_reward", 100.0)   # 防守方因占据理想防守位置获得的奖励系数
         self.h_params["k_def_area_reward"] = kwargs.get("k_def_area_reward", 150.0)  # 防守方因控制投篮区域获得的奖励系数
-        self.h_params["k_def_shot_penalty"] = kwargs.get("k_def_shot_penalty", 300.0)  # 对方投篮时，防守方受到的基础小额惩罚（鼓励积极防守）
+        self.h_params["k_def_shot_penalty"] = kwargs.get("k_def_shot_penalty", 500.0)  # 对方投篮时，防守方受到的基础小额惩罚（鼓励积极防守）
+        self.h_params["k_def_delay_bonus"] = kwargs.get("k_def_delay_bonus", 1000.0)  # 对方投篮成功时，防守方根据拖延时间获得的奖励系数
 
 
         # =================================================================================
@@ -303,7 +304,7 @@ class Scenario(BaseScenario):
         self.is_in_spot_a1 = torch.zeros(batch_dim,device=device)
 
 
-        # self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit, mode="max-autotune")
+        # self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit)
         self.jitted_reward_calculator = calculate_rewards_and_dones_jit
 
         self.reward_hist = {}
