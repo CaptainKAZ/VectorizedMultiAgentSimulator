@@ -176,6 +176,8 @@ def calculate_rewards_and_dones_jit(
         terminal_rewards[shot_b_idx, 1] += a2_reward
 
         # --- 计算防守方奖励 (D1 & D2) ---
+        time_elapsed_ratio = torch.clamp((h_params['t_limit'] - t_remaining[shot_b_idx].squeeze(-1)) / h_params['t_limit'],min=0.6)
+        R_delay_bonus = h_params['k_def_delay_bonus'] * time_elapsed_ratio
         for i in range(n_defenders):
             R_block = h_params['k_def_block_reward'] * block_contribution[:, i] # 封盖贡献奖励
             R_force = h_params['k_def_force_reward'] * (dist_a1_to_spot[shot_b_idx] / h_params['R_spot']) # 迫使远离投篮点奖励
@@ -197,7 +199,7 @@ def calculate_rewards_and_dones_jit(
             dist_def_to_spot_sq = torch.sum((defender_pos_shot[:, i, :] - spot_pos_shot)**2, dim=-1)
             R_area_control = h_params['k_def_area_reward'] * torch.exp(-dist_def_to_spot_sq / (2 * h_params['def_gaussian_spot_sigma']**2))
             
-            total_def_reward = R_block + R_force + R_positioning + R_area_control - h_params['k_def_shot_penalty']
+            total_def_reward = R_block + R_force + R_positioning + R_area_control - h_params['k_def_shot_penalty'] + R_delay_bonus
             terminal_rewards[shot_b_idx, n_attackers + i] += total_def_reward
         
         dones_out |= shot_attempted
