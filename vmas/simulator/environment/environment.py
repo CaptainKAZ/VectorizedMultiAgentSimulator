@@ -747,6 +747,38 @@ class Environment(TorchVectorizedObject):
                 )
                 agent.action.c += noise
 
+    def _tile_images(self, img_list):
+            if not img_list:
+                return None
+            
+            n_images = len(img_list)
+            h, w, c = img_list[0].shape
+            
+            # 计算网格行列数 (尽可能接近正方形)
+            n_cols = math.ceil(math.ceil(math.sqrt(n_images)))
+            n_rows = math.ceil(n_images / n_cols)
+            
+            # 创建画布
+            grid_h = n_rows * h
+            grid_w = n_cols * w
+            
+            # 初始化白色或黑色背景
+            grid_img = np.zeros((grid_h, grid_w, c), dtype=img_list[0].dtype)
+            
+            for idx, img in enumerate(img_list):
+                row = idx // n_cols
+                col = idx % n_cols
+                
+                y_start = row * h
+                y_end = y_start + h
+                x_start = col * w
+                x_end = x_start + w
+                
+                # 注意：图像可能需要翻转，这里直接放置即可，因为vmas的viewer通常已经处理了坐标
+                grid_img[y_start:y_end, x_start:x_end, :] = img
+                
+            return grid_img
+
     @local_seed(vmas_random_state)
     def render(
         self,
@@ -795,6 +827,75 @@ class Environment(TorchVectorizedObject):
         :return: Rgb array or None, depending on the mode
 
         """
+        if isinstance(env_index, list):
+            # 1. 强制获取每个环境的图像数据 (rgb_array)
+            frames = []
+            for idx in env_index:
+                frame = self.render(
+                    mode="rgb_array",
+                    env_index=idx,
+                    agent_index_focus=agent_index_focus,
+                    visualize_when_rgb=False, # 递归调用时不需要显示
+                    plot_position_function=plot_position_function,
+                    plot_position_function_precision=plot_position_function_precision,
+                    plot_position_function_range=plot_position_function_range,
+                    plot_position_function_cmap_range=plot_position_function_cmap_range,
+                    plot_position_function_cmap_alpha=plot_position_function_cmap_alpha,
+                    plot_position_function_cmap_name=plot_position_function_cmap_name,
+                )
+                frames.append(frame)
+
+            # 2. 拼接图像
+            tiled_img = self._tile_images(frames)
+
+            # 3. 根据模式输出
+            if mode == "rgb_array":
+                return tiled_img
+            
+            # 如果是 human 模式，我们需要把这张大图“画”到窗口里
+            # 初始化 Viewer (如果还没初始化)
+            if self.viewer is None:
+                self._init_rendering()
+                
+            from vmas.simulator.rendering import Image
+            
+            # 计算缩放比例以适应窗口
+            window_h, window_w = self.viewer.height, self.viewer.width
+            img_h, img_w, _ = tiled_img.shape
+            
+            # 保持纵横比缩放
+            scale = min(window_w / img_w, window_h / img_h)
+            
+            # 居中显示
+            display_w = img_w * scale
+            display_h = img_h * scale
+            off_x = (window_w - display_w) / 2
+            off_y = (window_h - display_h) / 2
+            
+            # 创建 Image Geom (vmas rendering.py 中的 Image 类支持 numpy 数组)
+            # 注意：rendering.py 的 Image 需要 (img, x, y, scale)
+            # 且 vmas 的 render loop 会在每次调用 viewer.render() 时清空 geoms，
+            # 但 onetime_geoms 会被清空，所以我们把它加到 onetime_geoms
+            
+            # 这里的坐标系原点通常在左下角，vmas 的 Image 也是基于此
+            # 但 numpy 数组通常是 (H, W, C)，vmas 的 Image 类里做了处理
+            
+            # 重要：为了防止递归调用 render 导致的上下文冲突，这里我们直接操作 viewer
+            self.viewer.window.clear()
+            self.viewer.window.switch_to()
+            self.viewer.dispatch_events()
+            
+            # 创建图像对象
+            image_geom = Image(tiled_img, x=off_x, y=off_y, scale=scale)
+            
+            # 使用 viewer 的正交投影设置进行绘制
+            # 这里我们手动模拟 viewer.render 的一部分，或者简单地利用 onetime 机制
+            # 为了简单起见，我们利用 onetime_geoms 并调用 render，
+            # 但这会导致 self.render 再次被调用吗？不会，因为我们现在就在 self.render 里。
+            
+            self.viewer.add_onetime(image_geom)
+            return self.viewer.render(return_rgb_array=False)
+
         self._check_batch_index(env_index)
         assert (
             mode in self.metadata["render.modes"]
