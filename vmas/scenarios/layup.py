@@ -74,7 +74,7 @@ class Scenario(BaseScenario):
     """
     def make_world(self, batch_dim: int, device: torch.device, **kwargs):
         self.viewer_zoom = 3.0
-        self.viewer_size = [1400,700]
+        self.viewer_size = [700,700]
         # ----------------- 超参数设定 (Hyperparameters) -----------------
         # 创建一个字典来存储所有超参数，以便统一传递给JIT编译的函数
         self.h_params = {}
@@ -103,8 +103,8 @@ class Scenario(BaseScenario):
         # 2. 回合终止条件 (Episode Termination Conditions)
         # =================================================================================
         # --- 2.1 投篮判定 ---
-        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.3) # 触发投篮所允许的最大速度
-        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 0.5)  # 触发投篮所允许的最大动作指令模长
+        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.6) # 触发投篮所允许的最大速度
+        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 1.0)  # 触发投篮所允许的最大动作指令模长
         self.h_params["shot_still_frames"] = kwargs.get("shot_still_frames", 10)   # 触发投篮需要在投篮区内保持静止的帧数
 
         # --- 2.2 犯规判定 ---
@@ -166,7 +166,7 @@ class Scenario(BaseScenario):
         self.h_params["k_action_access_max_penalty"] = kwargs.get("k_action_access_max_penalty", 20) # 动作指令超过阈值时的额外惩罚系数
         self.h_params["k_action_access_max_threshold"] = kwargs.get("k_action_access_max_threshold", 0.95) # 触发额外动作惩罚的阈值（v_max的百分比）
         self.h_params["k_brake_usage_penalty"] = kwargs.get("k_brake_usage_penalty", 0.1) # 使用刹车的惩罚系数
-        self.h_params["k_conflicting_action_penalty"] = kwargs.get("k_conflicting_action_penalty", 5) # 同时输出方向和刹车指令的矛盾惩罚系数
+        self.h_params["k_conflicting_action_penalty"] = kwargs.get("k_conflicting_action_penalty", 1) # 同时输出方向和刹车指令的矛盾惩罚系数
         self.h_params["k_excess_acceleration_penalty"] = kwargs.get("k_excess_acceleration_penalty", 0.001) # 请求加速度超过物理极限的惩罚系数
         self.h_params["k_action_jerk_penalty"] = kwargs.get("k_action_jerk_penalty", 0.01) # 动作指令变化率（Jerk）的惩罚系数，鼓励平滑动作
         self.h_params["k_coll_active"] = kwargs.get("k_coll_active", 5.0) # 作为主动碰撞方受到的惩罚系数
@@ -263,7 +263,7 @@ class Scenario(BaseScenario):
                 dynamics=Holonomic(),
                 render_action=True,
                 color=Color.RED if is_attacker and agent_id == 1 else Color.BLUE if not is_attacker else Color.PINK,
-                # action_size=3
+                action_size=3
             )
             agent.is_attacker = is_attacker
             agent.controller = VelocityController(agent, world, [6,0,0.01], "parallel")
@@ -321,13 +321,14 @@ class Scenario(BaseScenario):
         return world
 
     # @timer
+    # @torch.compile
+    # @timer
+    # @torch.compile
     def reset_world_at(self, env_index: int | None = None):
         """
-        根据指定的生成规则，使用高效的并行计算和局部抖动网格重置环境。
-        - a1: 位置固定。
-        - a2: 在靠近中线的己方条带内随机生成。
-        - d1, d2: 在靠近中线的己方条带内使用抖动网格生成，以避免碰撞。
-        此方法通过构造保证了所有智能体无初始碰撞且满足边界条件。
+        重置环境状态。
+        更新点：Spot 生成位置改为在[左、中、右]三个固定点附近服从高斯分布，
+               以降低随机性，辅助智能体形成稳定的进攻策略。
         """
         if env_index is None:
             batch_range = slice(None)
@@ -356,18 +357,54 @@ class Scenario(BaseScenario):
         self.p_raw_actions[batch_range] = 0.0
         self.termination_reason_code[batch_range] = 0
 
-        # 随机化篮筐和投篮点位置
+        # 随机化篮筐位置 (保持不变)
         basket_pos = torch.zeros(batch_dim, 2, device=self.world.device)
         basket_pos[:, 1] = self.h_params["L"] / 2 - 0.6
         self.basket.set_pos(basket_pos, batch_index=env_index)
 
-        spot_x = (torch.rand(batch_dim, 1, device=self.world.device) - 0.5) * (self.h_params["W"]-self.h_params["R_spot"])
-        spot_y = torch.rand(batch_dim, 1, device=self.world.device) * (self.h_params["L"] / 4) + (self.h_params["R_spot"])
-        spot_pos = torch.cat([spot_x, spot_y], dim=1)
+        # =========================================================================
+        # 核心修改：Spot 生成逻辑 (高斯混合分布)
+        # =========================================================================
+        
+        # 1. 定义锚点参数
+        # X轴偏移量：约场地宽度的 1/3.5，形成左中右三个明显区域
+        x_offset = self.h_params["W"] / 3.5 
+        # Y轴中心：取原随机范围 [R_spot, L/4 + R_spot] 的中间值
+        y_center = self.h_params["R_spot"] + (self.h_params["L"] / 4) / 2
+        
+        # 2. 随机选择模式 (0: Left, 1: Center, 2: Right)
+        mode = torch.randint(0, 3, (batch_dim, 1), device=self.world.device)
+        
+        # 3. 构建均值 (mu)
+        mu_x = torch.zeros((batch_dim, 1), device=self.world.device)
+        mu_x[mode == 0] = -x_offset # Left
+        mu_x[mode == 1] = 0.0       # Center
+        mu_x[mode == 2] = x_offset  # Right
+        
+        mu_y = torch.full((batch_dim, 1), y_center, device=self.world.device)
+        
+        # 4. 生成位置 (均值 + 高斯噪声)
+        # sigma=0.6 意味着约 68% 的点落在中心 0.6米 范围内，既有变化又有结构
+        sigma = 0.6 
+        noise = torch.randn((batch_dim, 2), device=self.world.device) * sigma
+        spot_pos = torch.cat([mu_x, mu_y], dim=1) + noise
+        
+        # 5. 边界限制 (Clamp)
+        # 确保生成的点依然在合法的场地范围内，不超出原来的逻辑边界
+        limit_x = (self.h_params["W"] - self.h_params["R_spot"]) / 2
+        limit_y_min = self.h_params["R_spot"]
+        limit_y_max = self.h_params["R_spot"] + self.h_params["L"] / 4
+        
+        spot_pos[:, 0] = torch.clamp(spot_pos[:, 0], -limit_x, limit_x)
+        spot_pos[:, 1] = torch.clamp(spot_pos[:, 1], limit_y_min, limit_y_max)
+
+        # 应用位置
         self.spot_center.set_pos(spot_pos, batch_index=env_index)
         self.shooting_area_vis.set_pos(spot_pos, batch_index=env_index)
 
-        # ---------- 高效并行化智能体放置 ----------
+        # =========================================================================
+
+        # ---------- 高效并行化智能体放置 (保持不变) ----------
         # 1. 获取参数
         W, L = self.h_params["W"], self.h_params["L"]
         agent_radius = self.h_params["agent_radius"]
@@ -382,39 +419,27 @@ class Scenario(BaseScenario):
         pos_a1 = torch.tensor([[pos_a1_x, pos_a1_y]], device=device, dtype=torch.float32).expand(batch_dim, -1)
 
         # --- 攻击方2 (a2): 在己方条带内随机生成 ---
-        # 生成区域: X轴在[-W/2, W/2]内，Y轴在[-spawn_area_depth, 0]内
-        # 为避免在边缘生成，所有计算均考虑agent_radius的边界
         valid_width = W - 2 * agent_radius
-        valid_depth = spawn_area_depth - agent_radius # 避免生成在y=0中线上
+        valid_depth = spawn_area_depth - agent_radius 
 
         pos_a2_x = (torch.rand(batch_dim, 1, device=device) - 0.5) * valid_width
-        # 在Y轴 [-spawn_area_depth, -agent_radius] 区间内生成
         pos_a2_y = -agent_radius - torch.rand(batch_dim, 1, device=device) * valid_depth
         pos_a2 = torch.cat([pos_a2_x, pos_a2_y], dim=1)
 
         # --- 防守方 (d1, d2): 在己方条带内使用局部抖动网格 ---
-        # 生成区域: X轴在[-W/2, W/2]内，Y轴在[0, spawn_area_depth]内
-        # 使用1x2的网格放置2个防守方，以从结构上避免碰撞
-        
-        # 定义网格单元尺寸
         def_cell_w = valid_width / n_defenders
-        
-        # 计算抖动范围
         max_jitter_x = max(0.0, (def_cell_w / 2) - agent_radius)
         max_jitter_y = max(0.0, valid_depth / 2)
 
-        # 生成随机抖动值
         def_jitter = (torch.rand(batch_dim, n_defenders, 2, device=device) - 0.5)
         def_jitter[:, :, 0] *= 2 * max_jitter_x
         def_jitter[:, :, 1] *= 2 * max_jitter_y
 
-        # 计算网格单元中心点（基础位置），并随机分配智能体到单元
         def_indices = torch.rand(batch_dim, n_defenders, device=device).argsort(dim=1)
         def_base_x = -valid_width/2 + def_cell_w/2 + def_indices * def_cell_w
         def_base_y = torch.full_like(def_base_x, agent_radius + valid_depth / 2)
         def_base_pos = torch.stack([def_base_x, def_base_y], dim=-1)
 
-        # 计算防守方最终位置
         pos_def = def_base_pos + def_jitter
 
         # --- 组合所有智能体位置 ---
@@ -425,34 +450,33 @@ class Scenario(BaseScenario):
             agent.set_pos(agent_positions[:, i, :], batch_index=env_index)
             agent.set_vel(torch.zeros(batch_dim, 2, device=self.world.device), batch_index=env_index)
 
-        # 1. 计算初始距离
+        # 1. 计算初始距离 (使用新的 spot_pos 计算)
         initial_dist = torch.linalg.norm(pos_a1 - spot_pos, dim=1)
         # 2. 计算本回合专用的、归一化后的速度奖励系数 k' = k / D_initial
         normalized_k = self.h_params['k_a1_speed_spot_reward'] / (initial_dist + 1e-6)
         # 3. 将这个计算好的、恒定的系数存储起来
         self.a1_normalized_speed_k[batch_range] = normalized_k
 
-
     # @timer
+    # @torch.compile
     def process_action(self, agent: Agent):
         agent_idx = self.world.agents.index(agent)
         
         # 1. 分离速度和刹车信号 (刹车信号范围现在是 [-5, 5])
-        target_vel_norm = agent.action.u[:, :2] / self.h_params['v_max']
-        final_target_vel = torch.sign(target_vel_norm) * torch.pow(torch.abs(target_vel_norm), 1.5) * self.h_params['v_max']
-        brake_signal = torch.zeros_like(agent.action.u[:, 0])
+        target_vel = agent.action.u[:, :2]
+        brake_signal = agent.action.u[:, 2]
 
         # 2. 实现刹车逻辑，【关键修改点】
         # 当刹车信号 > 0 时，我们判定AI想要刹车
-        # is_braking = brake_signal > 0
-        # final_target_vel = torch.where(
-        #     is_braking.unsqueeze(-1),
-        #     torch.zeros_like(target_vel),
-        #     target_vel
-        # )
+        is_braking = brake_signal > 0
+        final_target_vel = torch.where(
+            is_braking.unsqueeze(-1),
+            torch.zeros_like(target_vel),
+            target_vel
+        )
 
         # 3. 保存原始动作
-        self.raw_actions[:, agent_idx, :] = final_target_vel.clone()
+        self.raw_actions[:, agent_idx, :] = target_vel.clone()
         self.raw_breaks[:, agent_idx] = brake_signal.clone()
 
         # 4. 处理开局延迟
@@ -476,6 +500,7 @@ class Scenario(BaseScenario):
         agent.controller.process_force()
 
     # @timer
+    # @torch.compile
     def pre_step(self):
         """
         在每个物理步长开始前执行。
@@ -554,6 +579,7 @@ class Scenario(BaseScenario):
         self.dones_this_step.copy_(self.dones)
 
     # @timer
+    # @torch.compile
     def post_step(self):
         """
         在物理步长结束后执行，用于记录状态以备下一帧使用。
@@ -630,11 +656,15 @@ class Scenario(BaseScenario):
         is_in_spot_a1_obs = self.is_in_spot_a1.unsqueeze(-1)
         time_obs = self.t_remaining / self.h_params["t_limit"]
 
+        # 归一化的a1准备投篮读条
+        a1_shoot_process = self.a1_still_frames_counter.unsqueeze(-1) / self.h_params["shot_still_frames"]
+
         # --- 3. 拼接所有归一化后的特征 ---
         global_state = torch.cat([
             flat_agent_states,  # 16维
             spot_pos,           # 2维
             is_in_spot_a1_obs,  # 1维
+            a1_shoot_process,   # 1维
             basket_pos,         # 2维
             time_obs,           # 1维
         ], dim=-1)
@@ -655,6 +685,7 @@ class Scenario(BaseScenario):
         return rew
 
     # @timer
+    # @torch.compile
     def observation(self, agent: Agent):
         agent_idx = self.world.agents.index(agent)
         is_attacker = agent_idx < self.n_attackers
@@ -705,12 +736,12 @@ class Scenario(BaseScenario):
         norm_basket_rel_pos = basket_rel_pos / rel_pos_divisor
         
         # 攻击方和防守方看到的信息不同
-        if is_attacker:
-            spot_obs = spot_rel_pos / rel_pos_divisor
-            is_in_spot_a1 = self.is_in_spot_a1.unsqueeze(-1)
-        else:
-            spot_obs = torch.zeros_like(spot_rel_pos) # 防守方不知道投篮点
-            is_in_spot_a1 = torch.zeros_like(self.is_in_spot_a1.unsqueeze(-1))
+        spot_obs = spot_rel_pos / rel_pos_divisor
+        is_in_spot_a1 = self.is_in_spot_a1.unsqueeze(-1)
+        a1_shoot_process = self.a1_still_frames_counter.unsqueeze(-1) / self.h_params["shot_still_frames"]
+        if not is_attacker:
+            spot_obs = torch.zeros_like(spot_obs) # 防守方不知道投篮点
+            is_in_spot_a1 = torch.zeros_like(is_in_spot_a1)
             
         time_obs = self.t_remaining / self.h_params["t_limit"]
 
@@ -722,6 +753,7 @@ class Scenario(BaseScenario):
             opp2_obs,           # [4]
             spot_obs,           # [2]
             is_in_spot_a1,      # [1]
+            a1_shoot_process,   # [1]
             norm_basket_rel_pos,# [2]
             time_obs,           # [1]
         ], dim=-1)
@@ -729,68 +761,224 @@ class Scenario(BaseScenario):
         return obs.clone()
     
     def extra_render(self, env_index: int):
-        # 此部分用于在渲染窗口中额外绘制调试信息（如奖励曲线图）
-        geoms = []
-        from vmas.simulator.rendering import Geom
-        import io
-        
-        
-        class SpriteGeom(Geom):
-            def __init__(self, image, x, y, target_width, target_height):
+        from vmas.simulator import rendering
+        import pyglet.gl as gl
+        import pyglet
+
+        # --- 辅助函数：自动数值格式化 ---
+        def auto_format(value):
+            if value == 0: return "0.0"
+            abs_val = abs(value)
+            # 如果绝对值很大(>999)或很小(<0.01)，使用科学计数法
+            if abs_val > 999 or abs_val < 0.01:
+                return f"{value:.1e}"
+            else:
+                # 否则保留一位小数
+                return f"{value:.1f}"
+
+        # =========================================================================
+        # 1. 定义支持世界坐标的文字类 (WorldText)
+        # =========================================================================
+        class WorldText(rendering.Geom):
+            def __init__(self, text, x, y, size=0.5, color=(0, 0, 0, 255), anchor_x='left', anchor_y='bottom'):
                 super().__init__()
-                texture = image.get_texture()
-                flipped_texture = texture.get_transform(flip_y=True)
-                self.sprite = pyglet.sprite.Sprite(img=flipped_texture, x=x, y=y)
-                if self.sprite.width > 0: self.sprite.scale_x = target_width / self.sprite.width
-                if self.sprite.height > 0: self.sprite.scale_y = target_height / self.sprite.height
-                self.sprite.blend_src = pyglet.gl.GL_SRC_ALPHA
-                self.sprite.blend_dest = pyglet.gl.GL_ONE_MINUS_SRC_ALPHA
-            def render1(self):
-                self.sprite.draw()
-
-        plot_width = 10
-        plot_height = 6
-        pose_list = [(-14, 0), (4, 0), (-14, -6), (4, -6)] 
-        # 遍历每个智能体，更新其历史并绘图
-        for i, agent in enumerate(self.world.agents):
-            # 1. 计算当前步的奖励
-            rew_tensor = self.reward(agent)
-            # 2. 将当前环境的奖励值(标量)追加到历史记录中
-            if env_index not in self.reward_hist:
-                self.reward_hist[env_index] = {}
-            if i not in self.reward_hist[env_index]:
-                self.reward_hist[env_index][i] = []
-            self.reward_hist[env_index][i].append(rew_tensor[env_index].item())
-
-            # 3. 准备绘图
-            history_list = self.reward_hist[env_index][i]
-            artists = self.plot_artists[i]
-            fig, ax, line = artists['fig'], artists['ax'], artists['line']
-            
-            x_data = range(len(history_list))
-            line.set_data(x_data, history_list)
-            ax.relim()
-            ax.autoscale_view(tight=True)
-            
-            # 4. 将matplotlib图像转换为Pyglet可渲染对象
-            with io.BytesIO() as buf:
-                fig.canvas.draw()
-                image_data = fig.canvas.buffer_rgba().tobytes()
-                plot_image = pyglet.image.ImageData(
-                    fig.canvas.get_width_height()[0],
-                    fig.canvas.get_width_height()[1],
-                    'RGBA',
-                    image_data
+                self.x = x
+                self.y = y
+                # 使用高清字体渲染，然后缩小，保证清晰度
+                self.font_size_px = 40 
+                self.scale = size / self.font_size_px
+                
+                self.label = pyglet.text.Label(
+                    text,
+                    font_size=self.font_size_px,
+                    x=0, y=0,
+                    anchor_x=anchor_x, anchor_y=anchor_y,
+                    color=color
                 )
-                if i < len(pose_list):
-                    x, y = pose_list[i]
-                    img_geom = SpriteGeom(plot_image, x, y + 6, plot_width, plot_height)
-                    geoms.append(img_geom)
-        return geoms
 
-if __name__ == "__main__":
-    # 使用此脚本可以交互式地运行和测试环境
-    render_interactively(
-        __file__,
-        control_two_agents=True, # 允许手动控制两个智能体进行测试
-    )
+            def render1(self):
+                # 保存矩阵
+                gl.glPushMatrix()
+                # 移动到世界坐标
+                gl.glTranslatef(self.x, self.y, 0)
+                # 缩放 (米 -> 像素比例适配)
+                gl.glScalef(self.scale, self.scale, 1.0)
+                
+                # 【关键修复】重置颜色为白色，确保文字纹理颜色正确
+                # 因为 pyglet label 自身带有颜色属性，如果 OpenGL 上下文颜色不是纯白，
+                # 可能会导致文字颜色混合变暗或变色
+                gl.glColor4f(1, 1, 1, 1)
+                
+                self.label.draw()
+                gl.glPopMatrix()
+
+        # =========================================================================
+        # 2. 定义轻量级的高速绘图类 (FastLineGraph)
+        # =========================================================================
+        class FastLineGraph(rendering.Geom):
+            def __init__(self, data, x, y, width, height, color=(0, 0, 0, 1)):
+                super().__init__()
+                self.data = data
+                self.x = x
+                self.y = y
+                self.w = width
+                self.h = height
+                self.color = color
+                self.bg_color = (0.95, 0.95, 0.95, 0.8)
+                self.border_color = (0.5, 0.5, 0.5, 1.0)
+
+            def render1(self):
+                if not self.data: return
+                
+                # 背景
+                gl.glColor4f(*self.bg_color)
+                gl.glBegin(gl.GL_QUADS)
+                gl.glVertex2f(self.x, self.y)
+                gl.glVertex2f(self.x + self.w, self.y)
+                gl.glVertex2f(self.x + self.w, self.y + self.h)
+                gl.glVertex2f(self.x, self.y + self.h)
+                gl.glEnd()
+                
+                # 边框
+                gl.glLineWidth(1.0)
+                gl.glColor4f(*self.border_color)
+                gl.glBegin(gl.GL_LINE_LOOP)
+                gl.glVertex2f(self.x, self.y)
+                gl.glVertex2f(self.x + self.w, self.y)
+                gl.glVertex2f(self.x + self.w, self.y + self.h)
+                gl.glVertex2f(self.x, self.y + self.h)
+                gl.glEnd()
+
+                # 数据绘图
+                min_val = min(self.data)
+                max_val = max(self.data)
+                rng = max_val - min_val
+                if rng == 0: rng = 1.0
+                
+                # 增加 10% 的上下边距，防止线条贴边
+                padding = rng * 0.1
+                plot_min = min_val - padding
+                plot_rng = rng * 1.2
+
+                gl.glLineWidth(1.5)
+                gl.glColor4f(*self.color)
+                gl.glBegin(gl.GL_LINE_STRIP)
+                
+                num_points = len(self.data)
+                step_x = self.w / max(num_points - 1, 1)
+                
+                for i, val in enumerate(self.data):
+                    px = self.x + i * step_x
+                    # 归一化高度
+                    py = self.y + ((val - plot_min) / plot_rng) * self.h
+                    gl.glVertex2f(px, py)
+                gl.glEnd()
+
+        # =========================================================================
+        # 3. 准备图表和视觉元素
+        # =========================================================================
+        # 分层列表：确保渲染顺序 Graph -> Overlay -> Text
+        graph_geoms = []    
+        overlay_geoms = []  
+        text_geoms = []     
+
+        plot_w = 4.0
+        plot_h = 2.0
+        positions = [(-7, 4), (3, 4), (-7, -6), (3, -6)] 
+        colors = [(1, 0, 0, 1), (1, 0, 0, 1), (0, 0, 1, 1), (0, 0, 1, 1)] # 折线颜色
+        # 文字颜色 (RGBA int 0-255)
+        text_colors = [(200, 0, 0, 255), (200, 0, 0, 255), (0, 0, 200, 255), (0, 0, 200, 255)]
+
+        for i, agent in enumerate(self.world.agents):
+            # --- A. 数据记录与图表 ---
+            rew_tensor = self.reward(agent)
+            if env_index not in self.reward_hist: self.reward_hist[env_index] = {}
+            if i not in self.reward_hist[env_index]: self.reward_hist[env_index][i] = []
+            
+            self.reward_hist[env_index][i].append(rew_tensor[env_index].item())
+            
+            if i < len(positions):
+                hist_data = self.reward_hist[env_index][i]
+                display_data = hist_data[-200:] # 仅显示最近200帧
+                
+                if display_data:
+                    px, py = positions[i]
+                    
+                    # 1. 添加图表 (最底层)
+                    graph = FastLineGraph(display_data, px, py, plot_w, plot_h, colors[i])
+                    graph_geoms.append(graph)
+                    
+                    # 2. 添加数值标签 (最顶层)
+                    min_val = min(display_data)
+                    max_val = max(display_data)
+                    t_color = text_colors[i]
+                    
+                    # Max 标签 (左上角，对齐调整)
+                    text_geoms.append(WorldText(
+                        auto_format(max_val), 
+                        x=px + 0.1, y=py + plot_h - 0.1, 
+                        size=0.35, color=t_color,
+                        anchor_x='left', anchor_y='top' # 顶部对齐，防止超出边框
+                    ))
+                    # Min 标签 (左下角，对齐调整)
+                    text_geoms.append(WorldText(
+                        auto_format(min_val), 
+                        x=px + 0.1, y=py + 0.1, 
+                        size=0.35, color=t_color,
+                        anchor_x='left', anchor_y='bottom'
+                    ))
+
+            # --- B. 刹车状态 (中间层) ---
+            is_braking = self.raw_breaks[env_index, i].item() > 0
+            if is_braking:
+                pos = agent.state.pos[env_index]
+                radius = self.h_params["agent_radius"]
+                
+                brake_ring = rendering.make_circle(radius=radius * 1.3, filled=False)
+                brake_ring.set_color(1.0, 0.0, 0.0, 0.8)
+                brake_ring.add_attr(rendering.LineWidth(3))
+                
+                xform = rendering.Transform(translation=(pos[0].item(), pos[1].item()))
+                brake_ring.add_attr(xform)
+                overlay_geoms.append(brake_ring)
+
+            # --- C. A1 读条 (中间层) ---
+            if i == 0: 
+                current_frames = self.a1_still_frames_counter[env_index].item()
+                max_frames = self.h_params["shot_still_frames"]
+                
+                if current_frames > 0:
+                    ratio = min(max(current_frames / max_frames, 0.0), 1.0)
+                    bar_w, bar_h = 0.8, 0.15
+                    offset_y = self.h_params["agent_radius"] + 0.4
+                    
+                    # 读条背景
+                    bg_poly = rendering.make_polygon([
+                        (-bar_w/2, -bar_h/2), (bar_w/2, -bar_h/2),
+                        (bar_w/2, bar_h/2), (-bar_w/2, bar_h/2)
+                    ], filled=True)
+                    bg_poly.set_color(0.3, 0.3, 0.3, 0.8)
+                    
+                    # 读条前景
+                    fill_w = bar_w * ratio
+                    fg_poly = rendering.make_polygon([
+                        (-bar_w/2, -bar_h/2), (-bar_w/2 + fill_w, -bar_h/2),
+                        (-bar_w/2 + fill_w, bar_h/2), (-bar_w/2, bar_h/2)
+                    ], filled=True)
+                    
+                    if ratio >= 1.0:
+                        fg_poly.set_color(0.0, 1.0, 0.0, 0.9)
+                    else:
+                        fg_poly.set_color(1.0, 0.9, 0.0, 0.9)
+                        
+                    pos = agent.state.pos[env_index]
+                    xform = rendering.Transform(translation=(pos[0].item(), pos[1].item() + offset_y))
+                    bg_poly.add_attr(xform)
+                    fg_poly.add_attr(xform)
+                    
+                    overlay_geoms.append(bg_poly)
+                    overlay_geoms.append(fg_poly)
+
+        # 严格按照层级返回: 
+        # 底层(图表) -> 中层(状态圈) -> 顶层(文字)
+        return graph_geoms + overlay_geoms + text_geoms
