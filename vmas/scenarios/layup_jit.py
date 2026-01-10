@@ -94,6 +94,10 @@ def calculate_rewards_and_dones_jit(
         basket_pos_shot = basket_pos[shot_b_idx]
         defender_pos_shot = all_pos[shot_b_idx][:, 2:]
 
+        a2_in_def_half_at_shot = (a2_pos_shot[:, 1] >= 0)
+        a2_shot_pos_bonus = h_params.get('k_a2_shot_pos_bonus', 2.0)
+        terminal_rewards[shot_b_idx, 1] += a2_in_def_half_at_shot.float() * a2_shot_pos_bonus
+
         # --- 计算封盖因子 ---
         # 核心逻辑：判断防守球员是否在A1到篮筐的路径上，并根据距离计算封盖程度
         shot_vector = basket_pos_shot - a1_pos_shot
@@ -230,6 +234,18 @@ def calculate_rewards_and_dones_jit(
             min=-h_params['attacker_timeout_reward_max'],
             max=h_params['attacker_timeout_reward_max']
         )
+        # =================================================================================
+        # 【新增】：A2 偷懒惩罚（超时且在己方半场）
+        # =================================================================================
+        a2_pos_timeout = a2_pos[time_up]
+        # 判断 A2 是否还在进攻方（自己家）半场 (y < 0)
+        a2_is_stalling = (a2_pos_timeout[:, 1] < 0)
+        if torch.any(a2_is_stalling):
+            # 惩罚值 = 比例系数 * |y|
+            # y 越负（离中线越远），惩罚越重
+            stalling_penalty = h_params.get('k_a2_stalling_penalty', 5.0) * torch.abs(a2_pos_timeout[:, 1])
+            # 仅对偷懒的 A2 扣分
+            terminal_rewards[time_up, 1] -= a2_is_stalling.float() * stalling_penalty
         
         # 分配奖惩
         terminal_rewards[time_up, 0] = attacker_reward_clamped
@@ -372,6 +388,29 @@ def calculate_rewards_and_dones_jit(
         terminal_rewards[b_idx, n_attackers:] = defender_rewards_subset
         
         dones_out[b_idx] = True
+
+    if torch.any(dones_out):
+        # 1. 确定哪些防守者当前越线 (y < 0)
+        is_defender_over_midline = (defender_pos[:, :, 1] < 0) # [batch, n_defenders]
+        
+        # 2. 构造掩码：环境已结束 且 该防守者越线
+        # dones_out.unsqueeze(1) 将 [batch] 广播为 [batch, 1] 以匹配防守者维度
+        over_midline_at_end_mask = dones_out.unsqueeze(1) & is_defender_over_midline
+        
+        if torch.any(over_midline_at_end_mask):
+            # 3. 确定重罚值 (直接使用犯规等级的惩罚，例如 h_params['R_foul'])
+            # 这里取负值是因为 R_foul 通常在配置里定义为正数惩罚项
+            heavy_penalty_value = -h_params['R_midline_foul'] 
+            
+            # 4. 强制覆盖原有奖励：使用 torch.where 保证信号的唯一性和强烈性
+            # 仅针对 terminal_rewards 中的防守方部分（索引从 n_attackers 开始）
+            current_def_terminal_rewards = terminal_rewards[:, n_attackers:]
+            
+            terminal_rewards[:, n_attackers:] = torch.where(
+                over_midline_at_end_mask,
+                torch.full_like(current_def_terminal_rewards, heavy_penalty_value),
+                current_def_terminal_rewards
+            )
 
     # =================================================================================
     # 2. 稠密奖励计算 (Dense Rewards)
@@ -608,6 +647,14 @@ def calculate_rewards_and_dones_jit(
     line_penalty = h_params['k_a2_shot_line_penalty'] * line_block_factor * proximity_factor_a2
     
     dense_reward[:, 1] += screen_reward + interference_reward + repulsion_reward - line_penalty
+    
+    # 过线才有奖
+    a2_crossed_midline = (a2_pos[:, 1] >= 0)
+    dense_reward[:, 1] = torch.where(
+        a2_crossed_midline,
+        dense_reward[:, 1],
+        torch.clamp(dense_reward[:, 1], max=0.0)
+    )
 
     # 2.4.3 防守者 (Defenders) 奖励/惩罚
     

@@ -783,7 +783,7 @@ class Environment(TorchVectorizedObject):
     def render(
         self,
         mode="human",
-        env_index=0,
+        env_index=[0,1,2,3],
         agent_index_focus: int = None,
         visualize_when_rgb: bool = False,
         plot_position_function: Callable = None,

@@ -103,12 +103,12 @@ class Scenario(BaseScenario):
         # 2. 回合终止条件 (Episode Termination Conditions)
         # =================================================================================
         # --- 2.1 投篮判定 ---
-        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.6) # 触发投篮所允许的最大速度
-        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 1.0)  # 触发投篮所允许的最大动作指令模长
+        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.2) # 触发投篮所允许的最大速度
+        self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 2.0)  # 触发投篮所允许的最大动作指令模长
         self.h_params["shot_still_frames"] = kwargs.get("shot_still_frames", 10)   # 触发投篮需要在投篮区内保持静止的帧数
 
         # --- 2.2 犯规判定 ---
-        self.h_params["v_foul_threshold"] = kwargs.get("v_foul_threshold", 0.6)        # 判定为碰撞犯规的最小相对速度
+        self.h_params["v_foul_threshold"] = kwargs.get("v_foul_threshold", 0.5)        # 判定为碰撞犯规的最小相对速度
         self.h_params["wall_collision_frames"] = kwargs.get("wall_collision_frames", 20.0) # 持续撞墙导致回合结束的帧数阈值
         self.h_params["max_time_over_midline"] = kwargs.get("max_time_over_midline", 20.0) # 防守方允许越过中线的最大帧数
 
@@ -125,23 +125,25 @@ class Scenario(BaseScenario):
         self.h_params["k_time_bonus"] = kwargs.get("k_time_bonus", 6000.0) # 投篮时间奖励系数，剩余时间越多奖励越高
         self.h_params["k_spacing_bonus"] = kwargs.get("k_spacing_bonus", 1000.0) # A1投篮时，与防守方平均距离的奖励系数
         self.h_params['k_shot_stillness_vel_bonus'] = kwargs.get("k_shot_stillness_vel_bonus", 1000.0) # A1投篮时速度够慢的额外奖励
-        self.h_params['k_shot_stillness_act_bonus'] = kwargs.get("k_shot_stillness_act_bonus", 1000.0) # A1投篮时动作指令够小的额外奖励
-        self.h_params["k_a2_screen_bonus"] = kwargs.get("k_a2_screen_bonus", 2000.0) # A1投篮时，A2成功掩护的额外奖励
+        self.h_params['k_shot_stillness_act_bonus'] = kwargs.get("k_shot_stillness_act_bonus", 0.0) # A1投篮时动作指令够小的额外奖励
+        self.h_params["k_a2_screen_bonus"] = kwargs.get("k_a2_screen_bonus", 3000.0) # A1投篮时，A2成功掩护的额外奖励
+        self.h_params["k_a2_shot_pos_bonus"] = kwargs.get("k_a2_shot_pos_bonus", 3000.0) # A1投篮时，A2在防守方半场奖励
         self.h_params["a2_screen_sigma"] = kwargs.get("a2_screen_sigma", 4 * self.h_params["agent_radius"]) # A2掩护奖励高斯函数的标准差
 
         # --- 3.2 进攻超时 ---
         self.h_params["defender_timeout_reward"] = kwargs.get("defender_timeout_reward", 9000.0) # 进攻超时，防守方获得的奖励
-        self.h_params["attacker_timeout_reward_max"] = kwargs.get("attacker_timeout_reward_max", 2000) # 进攻超时，进攻方惩罚/奖励的绝对值上限
-        self.h_params["k_timeout_move_vel_penalty"] = kwargs.get("k_timeout_move_vel_penalty", 10.0) # 超时瞬间，A1因速度过大受到的惩罚系数
-        self.h_params["k_timeout_move_act_penalty"] = kwargs.get("k_timeout_move_act_penalty", 10.0) # 超时瞬间，A1因动作指令过大受到的惩罚系数
-        self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 200.0) # 超时瞬间，A1在圈外时，根据距离远近受到的惩罚系数
+        self.h_params["attacker_timeout_reward_max"] = kwargs.get("attacker_timeout_reward_max", 2500) # 进攻超时，进攻方惩罚/奖励的绝对值上限
+        self.h_params["k_timeout_move_vel_penalty"] = kwargs.get("k_timeout_move_vel_penalty", 200.0) # 超时瞬间，A1因速度过大受到的惩罚系数
+        self.h_params["k_timeout_move_act_penalty"] = kwargs.get("k_timeout_move_act_penalty", 0.0) # 超时瞬间，A1因动作指令过大受到的惩罚系数
+        self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 400.0) # 超时瞬间，A1在圈外时，根据距离远近受到的惩罚系数
         self.h_params["attacker_timeout_base_reward_out_spot"] = kwargs.get("attacker_timeout_base_reward_out_spot", -100.0) # 超时瞬间，A1在圈外的基础惩罚
-        self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", 500.0)    # 超时瞬间，A1在圈内的基础奖励/惩罚
+        self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", 200.0)    # 超时瞬间，A1在圈内的基础奖励/惩罚
+        self.h_params["k_a2_stalling_penalty"] = kwargs.get("k_a2_stalling_penalty", 100.0)    # 超时瞬间，A2在己方半场深度惩罚
 
         # --- 3.3 犯规 ---
-        self.h_params["R_foul"] = kwargs.get("R_foul", 2000.0) # 碰撞犯规的基础奖励/惩罚值
+        self.h_params["R_foul"] = kwargs.get("R_foul", 6000.0) # 碰撞犯规的基础奖励/惩罚值
         self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 1000.0) # 碰撞犯规时，根据相对速度大小调整惩罚的系数
-        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.5) # 犯规发生时，被犯规方队友获得的奖励比例
+        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.6) # 犯规发生时，被犯规方队友获得的奖励比例
         self.h_params["R_wall_collision_penalty"] = kwargs.get("R_wall_collision_penalty", -11000.0) # 因持续撞墙导致回合结束的惩罚
         self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 12000.0) # 防守方因持续越线导致回合结束的惩罚
 
@@ -163,7 +165,7 @@ class Scenario(BaseScenario):
         self.h_params["oob_penalty"] = kwargs.get("oob_penalty", -3000.0) # 出界惩罚系数
         self.h_params["oob_margin"] = kwargs.get("oob_margin", 0.05) # 出界惩罚的平滑边界宽度
         self.h_params["k_u_penalty_general"] = kwargs.get("k_u_penalty_general", 0.1) # 动作指令大小的基础惩罚系数
-        self.h_params["k_action_access_max_penalty"] = kwargs.get("k_action_access_max_penalty", 20) # 动作指令超过阈值时的额外惩罚系数
+        self.h_params["k_action_access_max_penalty"] = kwargs.get("k_action_access_max_penalty", 1) # 动作指令超过阈值时的额外惩罚系数
         self.h_params["k_action_access_max_threshold"] = kwargs.get("k_action_access_max_threshold", 0.95) # 触发额外动作惩罚的阈值（v_max的百分比）
         self.h_params["k_brake_usage_penalty"] = kwargs.get("k_brake_usage_penalty", 0.1) # 使用刹车的惩罚系数
         self.h_params["k_conflicting_action_penalty"] = kwargs.get("k_conflicting_action_penalty", 1) # 同时输出方向和刹车指令的矛盾惩罚系数
@@ -181,11 +183,11 @@ class Scenario(BaseScenario):
         self.h_params["charge_drawing_range"] = kwargs.get("charge_drawing_range", self.h_params["agent_radius"] * 6.0) # “造犯规”的有效距离
 
         # --- 4.2 进攻方 - A1 (持球人) ---
-        self.h_params["k_a1_speed_spot_reward"] = kwargs.get("k_a1_speed_spot_reward", 2000.0) # 吸引A1到投篮点的路程总奖励
+        self.h_params["k_a1_speed_spot_reward"] = kwargs.get("k_a1_speed_spot_reward", 5000.0) # 吸引A1到投篮点的路程总奖励
         self.h_params["gaussian_scale"] = kwargs.get("gaussian_scale", 600.0) # 吸引A1到投篮点的高斯奖励的峰值大小
         self.h_params["gaussian_sigma"] = kwargs.get("gaussian_sigma", 0.5 * self.h_params["R_spot"]) # 高斯奖励的宽度，决定了吸引力的范围
         self.h_params["k_a1_in_spot_reward"] = kwargs.get("k_a1_in_spot_reward", 3.0) # A1在投篮区域内时，每步获得的持续性奖励系数
-        self.h_params["k_a1_ready_to_shoot_reward"] = kwargs.get("k_a1_ready_to_shoot_reward", 100.0) # A1处于“准备投篮”状态时的奖励系数
+        self.h_params["k_a1_ready_to_shoot_reward"] = kwargs.get("k_a1_ready_to_shoot_reward", 500.0) # A1处于“准备投篮”状态时的奖励系数
         self.h_params["k_a1_velocity_stillness_reward"] = kwargs.get("k_a1_velocity_stillness_reward", 20.0) # 在投篮区内，A1速度越慢奖励越高的系数
         self.h_params["velocity_stillness_sigma"] = kwargs.get("velocity_stillness_sigma", 0.4) # 速度静止奖励高斯函数的标准差
         self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 10) # 在投篮区内，A1动作指令越小奖励越高的系数
@@ -203,9 +205,9 @@ class Scenario(BaseScenario):
         self.h_params["k_a1_proximity_penalty"] = kwargs.get("k_a1_proximity_penalty", 60) # A1的近距离惩罚系数
 
         # --- 4.3 进攻方 - A2 (无球人) ---
-        self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 60.0) # A2移动到最佳掩护位置的奖励系数
-        self.h_params["k_a2_interference_reward"] = kwargs.get("k_a2_interference_reward", 40.0) # A2靠近并干扰防守者的奖励系数
-        self.h_params["k_repulsion_reward"] = kwargs.get("k_repulsion_reward", 60.0) # A2迫使防守者远离A1的“排斥”奖励系数
+        self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 600.0) # A2移动到最佳掩护位置的奖励系数
+        self.h_params["k_a2_interference_reward"] = kwargs.get("k_a2_interference_reward", 400.0) # A2靠近并干扰防守者的奖励系数
+        self.h_params["k_repulsion_reward"] = kwargs.get("k_repulsion_reward", 600.0) # A2迫使防守者远离A1的“排斥”奖励系数
         self.h_params["repulsion_proximity_threshold"] = kwargs.get("repulsion_proximity_threshold", self.h_params["R_spot"]) # 触发排斥奖励时，A2需要离防守者足够近的距离
         self.h_params["k_a2_shot_line_penalty"] = kwargs.get("k_a2_shot_line_penalty", 30) # A2阻挡A1投篮路线的惩罚系数
         self.h_params["screen_pos_offset"] = kwargs.get("screen_pos_offset", self.h_params["agent_radius"] * 3) # 定义“理想掩护位置”在防守者身后的距离
@@ -261,9 +263,9 @@ class Scenario(BaseScenario):
                 drag=0.01,
                 shape=Sphere(radius=self.h_params["agent_radius"]),
                 dynamics=Holonomic(),
-                render_action=True,
+                # render_action=True,
                 color=Color.RED if is_attacker and agent_id == 1 else Color.BLUE if not is_attacker else Color.PINK,
-                action_size=3
+                # action_size=3
             )
             agent.is_attacker = is_attacker
             agent.controller = VelocityController(agent, world, [6,0,0.01], "parallel")
@@ -276,7 +278,7 @@ class Scenario(BaseScenario):
 
         self.basket = Landmark(name="basket", collide=False, shape=Sphere(radius=0.1), color=Color.ORANGE)
         self.spot_center = Landmark(name="spot_center", collide=False, shape=Sphere(radius=0.05), color=Color.GREEN)
-        self.shooting_area_vis = Landmark(name="shooting_area_vis", collide=False, shape=Sphere(radius=self.h_params["R_spot"]), color=Color.LIGHT_GREEN)
+        self.shooting_area_vis = Landmark(name="shooting_area_vis", collide=False, shape=Sphere(radius=self.h_params["R_spot"]), color=(0.45, 0.95, 0.45,0.2))
         center_line = Landmark(name="center_line", collide=False, shape=Line(length=self.h_params["W"]), color=Color.GRAY)
         world.add_landmark(center_line)
         world.add_landmark(self.basket)
@@ -304,7 +306,7 @@ class Scenario(BaseScenario):
         self.is_in_spot_a1 = torch.zeros(batch_dim,device=device)
 
 
-        # self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit, mode="max-autotune")
+        # self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit)
         self.jitted_reward_calculator = calculate_rewards_and_dones_jit
 
         self.reward_hist = {}
@@ -326,136 +328,95 @@ class Scenario(BaseScenario):
     # @torch.compile
     def reset_world_at(self, env_index: int | None = None):
         """
-        重置环境状态。
-        更新点：Spot 生成位置改为在[左、中、右]三个固定点附近服从高斯分布，
-               以降低随机性，辅助智能体形成稳定的进攻策略。
+        优化后的重置函数：减少 CPU 调度开销，向量化索引，并根据环境数量条件化记录 Reward Hist。
         """
-        if env_index is None:
-            batch_range = slice(None)
-            batch_dim = self.world.batch_dim
-            self.reward_hist.clear()
-        else:
-            batch_range = env_index
-            batch_dim = 1 if isinstance(env_index, int) else len(env_index)
-            if isinstance(env_index, int):
-                if env_index in self.reward_hist:
-                    del self.reward_hist[env_index]
-            else: # env_index is a list or tensor
-                for idx in env_index:
-                    if idx in self.reward_hist:
-                        del self.reward_hist[idx]
-        
-        # 重置时间和内部状态
-        self.t_remaining[batch_range] = self.h_params["t_limit"]
-        self.terminal_rewards[batch_range] = 0.0
-        self.p_vels[batch_range] = 0.0
+        device = self.world.device
+        batch_dim = self.world.batch_dim if env_index is None else (1 if isinstance(env_index, int) else len(env_index))
+        batch_range = slice(None) if env_index is None else env_index
+
+        # --- 1. 条件化维护 reward_hist (仅在环境数 < 32 时生效) ---
+        if self.world.batch_dim < 32:
+            if env_index is None:
+                self.reward_hist.clear()
+            else:
+                indices = [env_index] if isinstance(env_index, int) else env_index
+                for idx in indices:
+                    self.reward_hist.pop(idx, None)
+
+        # --- 2. 状态重置 (使用 copy_ 减少分配) ---
+        self.t_remaining[batch_range].fill_(self.h_params["t_limit"])
+        self.terminal_rewards[batch_range].zero_()
+        self.p_vels[batch_range].zero_()
         self.delay_counter[batch_range] = self.start_delay_frames
         self.a1_still_frames_counter[batch_range] = 0
         self.wall_collision_counters[batch_range] = 0
         self.defender_over_midline_counter[batch_range] = 0
-        self.dones[batch_range] = 0
-        self.p_raw_actions[batch_range] = 0.0
+        self.dones[batch_range] = False
+        self.p_raw_actions[batch_range].zero_()
         self.termination_reason_code[batch_range] = 0
 
-        # 随机化篮筐位置 (保持不变)
-        basket_pos = torch.zeros(batch_dim, 2, device=self.world.device)
+        # --- 3. 篮筐位置 (向量化赋值) ---
+        basket_pos = torch.zeros((batch_dim, 2), device=device)
         basket_pos[:, 1] = self.h_params["L"] / 2 - 0.6
         self.basket.set_pos(basket_pos, batch_index=env_index)
 
-        # =========================================================================
-        # 核心修改：Spot 生成逻辑 (高斯混合分布)
-        # =========================================================================
+        # --- 4. 优化后的 Spot 生成 (索引替代掩码) ---
+        x_offset_val = self.h_params["W"] / 3.5
+        # 预设三个中心点 X 坐标
+        x_centers = torch.tensor([-x_offset_val, 0.0, x_offset_val], device=device)
+        mode = torch.randint(0, 3, (batch_dim,), device=device)
         
-        # 1. 定义锚点参数
-        # X轴偏移量：约场地宽度的 1/3.5，形成左中右三个明显区域
-        x_offset = self.h_params["W"] / 3.5 
-        # Y轴中心：取原随机范围 [R_spot, L/4 + R_spot] 的中间值
-        y_center = self.h_params["R_spot"] + (self.h_params["L"] / 4) / 2
+        y_center = self.h_params["R_spot"] + (self.h_params["L"] / 8)
         
-        # 2. 随机选择模式 (0: Left, 1: Center, 2: Right)
-        mode = torch.randint(0, 3, (batch_dim, 1), device=self.world.device)
-        
-        # 3. 构建均值 (mu)
-        mu_x = torch.zeros((batch_dim, 1), device=self.world.device)
-        mu_x[mode == 0] = -x_offset # Left
-        mu_x[mode == 1] = 0.0       # Center
-        mu_x[mode == 2] = x_offset  # Right
-        
-        mu_y = torch.full((batch_dim, 1), y_center, device=self.world.device)
-        
-        # 4. 生成位置 (均值 + 高斯噪声)
-        # sigma=0.6 意味着约 68% 的点落在中心 0.6米 范围内，既有变化又有结构
-        sigma = 0.6 
-        noise = torch.randn((batch_dim, 2), device=self.world.device) * sigma
-        spot_pos = torch.cat([mu_x, mu_y], dim=1) + noise
-        
-        # 5. 边界限制 (Clamp)
-        # 确保生成的点依然在合法的场地范围内，不超出原来的逻辑边界
+        # 直接计算 spot_pos，减少 intermediate tensors
+        spot_pos = torch.randn((batch_dim, 2), device=device).mul_(0.6)
+        spot_pos[:, 0].add_(x_centers[mode])
+        spot_pos[:, 1].add_(y_center)
+
+        # 原地边界限制
         limit_x = (self.h_params["W"] - self.h_params["R_spot"]) / 2
         limit_y_min = self.h_params["R_spot"]
-        limit_y_max = self.h_params["R_spot"] + self.h_params["L"] / 4
-        
-        spot_pos[:, 0] = torch.clamp(spot_pos[:, 0], -limit_x, limit_x)
-        spot_pos[:, 1] = torch.clamp(spot_pos[:, 1], limit_y_min, limit_y_max)
+        limit_y_max = limit_y_min + self.h_params["L"] / 4
+        spot_pos[:, 0].clamp_(-limit_x, limit_x)
+        spot_pos[:, 1].clamp_(limit_y_min, limit_y_max)
 
-        # 应用位置
         self.spot_center.set_pos(spot_pos, batch_index=env_index)
         self.shooting_area_vis.set_pos(spot_pos, batch_index=env_index)
 
-        # =========================================================================
-
-        # ---------- 高效并行化智能体放置 (保持不变) ----------
-        # 1. 获取参数
+        # --- 5. 智能体位置初始化 (避免大规模 cat) ---
         W, L = self.h_params["W"], self.h_params["L"]
-        agent_radius = self.h_params["agent_radius"]
-        spawn_area_depth = self.spawn_area_depth
-        n_defenders = self.n_defenders
-        device = self.world.device
+        r = self.h_params["agent_radius"]
+        depth = self.spawn_area_depth
 
-        # --- 攻击方1 (a1): 固定位置 ---
-        # 固定在场地左下角，并留出自身半径的边界
-        pos_a1_x = -W / 2 + agent_radius * 2
-        pos_a1_y = -L / 2 + agent_radius * 2
-        pos_a1 = torch.tensor([[pos_a1_x, pos_a1_y]], device=device, dtype=torch.float32).expand(batch_dim, -1)
+        # 构造所有智能体的位置张量 [batch, agents, 2]
+        all_pos = torch.empty((batch_dim, self.n_agents, 2), device=device)
 
-        # --- 攻击方2 (a2): 在己方条带内随机生成 ---
-        valid_width = W - 2 * agent_radius
-        valid_depth = spawn_area_depth - agent_radius 
+        # A1: 固定起点
+        all_pos[:, 0, 0] = -W / 2 + r * 2
+        all_pos[:, 0, 1] = -L / 2 + r * 2
 
-        pos_a2_x = (torch.rand(batch_dim, 1, device=device) - 0.5) * valid_width
-        pos_a2_y = -agent_radius - torch.rand(batch_dim, 1, device=device) * valid_depth
-        pos_a2 = torch.cat([pos_a2_x, pos_a2_y], dim=1)
+        # A2: 进攻方区域随机
+        all_pos[:, 1, 0] = (torch.rand(batch_dim, device=device) - 0.5) * (W - 2 * r)
+        all_pos[:, 1, 1] = -r - torch.rand(batch_dim, device=device) * (depth - r)
 
-        # --- 防守方 (d1, d2): 在己方条带内使用局部抖动网格 ---
-        def_cell_w = valid_width / n_defenders
-        max_jitter_x = max(0.0, (def_cell_w / 2) - agent_radius)
-        max_jitter_y = max(0.0, valid_depth / 2)
+        # Defenders: 简化网格分配 (移除 argsort 以提速)
+        def_x_base = torch.linspace(-W/2 + r*2, W/2 - r*2, self.n_defenders, device=device)
+        # 给每个防守者增加随机抖动
+        for d_idx in range(self.n_defenders):
+            agent_idx = self.n_attackers + d_idx
+            all_pos[:, agent_idx, 0] = def_x_base[d_idx] + (torch.rand(batch_dim, device=device) - 0.5) * (W/self.n_defenders * 0.5)
+            all_pos[:, agent_idx, 1] = r + torch.rand(batch_dim, device=device) * depth
 
-        def_jitter = (torch.rand(batch_dim, n_defenders, 2, device=device) - 0.5)
-        def_jitter[:, :, 0] *= 2 * max_jitter_x
-        def_jitter[:, :, 1] *= 2 * max_jitter_y
-
-        def_indices = torch.rand(batch_dim, n_defenders, device=device).argsort(dim=1)
-        def_base_x = -valid_width/2 + def_cell_w/2 + def_indices * def_cell_w
-        def_base_y = torch.full_like(def_base_x, agent_radius + valid_depth / 2)
-        def_base_pos = torch.stack([def_base_x, def_base_y], dim=-1)
-
-        pos_def = def_base_pos + def_jitter
-
-        # --- 组合所有智能体位置 ---
-        agent_positions = torch.cat([pos_a1.unsqueeze(1), pos_a2.unsqueeze(1), pos_def], dim=1)
-        
-        # 设置智能体状态
+        # 统一应用位置和速度
+        zero_vel = torch.zeros((batch_dim, 2), device=device)
         for i, agent in enumerate(self.world.agents):
-            agent.set_pos(agent_positions[:, i, :], batch_index=env_index)
-            agent.set_vel(torch.zeros(batch_dim, 2, device=self.world.device), batch_index=env_index)
+            agent.set_pos(all_pos[:, i], batch_index=env_index)
+            agent.set_vel(zero_vel, batch_index=env_index)
 
-        # 1. 计算初始距离 (使用新的 spot_pos 计算)
-        initial_dist = torch.linalg.norm(pos_a1 - spot_pos, dim=1)
-        # 2. 计算本回合专用的、归一化后的速度奖励系数 k' = k / D_initial
-        normalized_k = self.h_params['k_a1_speed_spot_reward'] / (initial_dist + 1e-6)
-        # 3. 将这个计算好的、恒定的系数存储起来
-        self.a1_normalized_speed_k[batch_range] = normalized_k
+        # --- 6. 预计算速度奖励系数 (向量化) ---
+        # dist(pos_a1, spot_pos)
+        initial_dist = torch.norm(all_pos[:, 0] - spot_pos, dim=1)
+        self.a1_normalized_speed_k[batch_range] = self.h_params['k_a1_speed_spot_reward'] / (initial_dist + 1e-6)
 
     # @timer
     # @torch.compile
@@ -464,19 +425,23 @@ class Scenario(BaseScenario):
         
         # 1. 分离速度和刹车信号 (刹车信号范围现在是 [-5, 5])
         target_vel = agent.action.u[:, :2]
-        brake_signal = agent.action.u[:, 2]
+        # brake_signal = agent.action.u[:, 2]
+        mag = torch.norm(target_vel, p=2, dim=1, keepdim=True)
+        final_target_vel = target_vel * torch.pow(mag / self.h_params['v_max'], 1.5 - 1)
+        
+        brake_signal = torch.zeros_like(agent.action.u[:, 0])
 
         # 2. 实现刹车逻辑，【关键修改点】
         # 当刹车信号 > 0 时，我们判定AI想要刹车
-        is_braking = brake_signal > 0
-        final_target_vel = torch.where(
-            is_braking.unsqueeze(-1),
-            torch.zeros_like(target_vel),
-            target_vel
-        )
+        # is_braking = brake_signal > 0
+        # final_target_vel = torch.where(
+        #     is_braking.unsqueeze(-1),
+        #     torch.zeros_like(target_vel),
+        #     target_vel
+        # )
 
         # 3. 保存原始动作
-        self.raw_actions[:, agent_idx, :] = target_vel.clone()
+        self.raw_actions[:, agent_idx, :] = final_target_vel.clone()
         self.raw_breaks[:, agent_idx] = brake_signal.clone()
 
         # 4. 处理开局延迟
@@ -486,7 +451,7 @@ class Scenario(BaseScenario):
 
         # 5. 实现动作死区
         action_norm = torch.linalg.vector_norm(final_target_vel, dim=1)
-        final_target_vel[action_norm < 0.1] = 0.0
+        final_target_vel[action_norm < 0.2] = 0.0
         
         # 6. 后续所有操作都基于我们最终计算出的 final_target_vel
         clamped_vel = TorchUtils.clamp_with_norm(final_target_vel, agent.u_range)
@@ -638,9 +603,10 @@ class Scenario(BaseScenario):
         # 归一化所有智能体的位置和速度
         all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)
         all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
+
         norm_all_pos = all_pos / pos_divisor
         norm_all_vel = all_vel / max_v
-        
+        # norm_brake = (self.raw_breaks / 5.0).unsqueeze(-1)
         # [B, N, 2] 和 [B, N, 2] -> [B, N, 4]
         agent_states = torch.cat([norm_all_pos, norm_all_vel], dim=-1)
 
