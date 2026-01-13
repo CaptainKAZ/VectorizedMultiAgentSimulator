@@ -9,9 +9,6 @@ from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.dynamics.holonomic import Holonomic
 from vmas.simulator.utils import Color, TorchUtils
 from vmas.simulator.controllers.velocity_controller import VelocityController
-import matplotlib
-matplotlib.use('Agg') # 对于非交互式绘图至关重要
-import matplotlib.pyplot as plt
 import io
 import pyglet
 import numpy as np
@@ -103,7 +100,23 @@ class Scenario(BaseScenario):
         # 2. 回合终止条件 (Episode Termination Conditions)
         # =================================================================================
         # --- 2.1 投篮判定 ---
-        self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.2) # 触发投篮所允许的最大速度
+        # self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.2) # 触发投篮所允许的最大速度
+        self.is_eval = batch_dim < 32 # 判定是否为评估环境
+        self.v_shot_threshold_target = kwargs.get("v_shot_threshold", 0.2)
+        
+        if self.is_eval:
+            # 评估环境：始终使用最高难度
+            self.v_shot_threshold_current = self.v_shot_threshold_target
+            print(f" [Mode: EVAL] Initialized with target difficulty: {self.v_shot_threshold_current} m/s")
+        else:
+            # 训练环境：从宽松条件开始
+            self.v_shot_threshold_current = .2
+            self.v_shot_step = 0.05
+            self.success_needed = max(1, batch_dim // 10)
+            self.cumulative_successes = 0
+            print(f" [Mode: TRAIN] Initialized curriculum. Start: {self.v_shot_threshold_current} m/s, Goal: {self.v_shot_threshold_target} m/s")
+
+        self.h_params["v_shot_threshold"] = self.v_shot_threshold_current # 写入JIT参数字典
         self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 2.0)  # 触发投篮所允许的最大动作指令模长
         self.h_params["shot_still_frames"] = kwargs.get("shot_still_frames", 10)   # 触发投篮需要在投篮区内保持静止的帧数
 
@@ -153,7 +166,7 @@ class Scenario(BaseScenario):
         self.h_params["k_def_pos_reward"] = kwargs.get("k_def_pos_reward", 100.0)   # 防守方因占据理想防守位置获得的奖励系数
         self.h_params["k_def_area_reward"] = kwargs.get("k_def_area_reward", 150.0)  # 防守方因控制投篮区域获得的奖励系数
         self.h_params["k_def_shot_penalty"] = kwargs.get("k_def_shot_penalty", 3000.0)  # 对方投篮时，防守方受到的基础小额惩罚（鼓励积极防守）
-        self.h_params["k_def_delay_bonus"] = kwargs.get("k_def_delay_bonus", 1000.0)  # 对方投篮成功时，防守方根据拖延时间获得的奖励系数
+        self.h_params["k_def_delay_bonus"] = kwargs.get("k_def_delay_bonus", 3000.0)  # 对方投篮成功时，防守方根据拖延时间获得的奖励系数
 
 
         # =================================================================================
@@ -205,11 +218,11 @@ class Scenario(BaseScenario):
         self.h_params["k_a1_proximity_penalty"] = kwargs.get("k_a1_proximity_penalty", 60) # A1的近距离惩罚系数
 
         # --- 4.3 进攻方 - A2 (无球人) ---
-        self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 600.0) # A2移动到最佳掩护位置的奖励系数
+        self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 200.0) # A2移动到最佳掩护位置的奖励系数
         self.h_params["k_a2_interference_reward"] = kwargs.get("k_a2_interference_reward", 400.0) # A2靠近并干扰防守者的奖励系数
-        self.h_params["k_repulsion_reward"] = kwargs.get("k_repulsion_reward", 600.0) # A2迫使防守者远离A1的“排斥”奖励系数
+        self.h_params["k_repulsion_reward"] = kwargs.get("k_repulsion_reward", 800.0) # A2迫使防守者远离A1的“排斥”奖励系数
         self.h_params["repulsion_proximity_threshold"] = kwargs.get("repulsion_proximity_threshold", self.h_params["R_spot"]) # 触发排斥奖励时，A2需要离防守者足够近的距离
-        self.h_params["k_a2_shot_line_penalty"] = kwargs.get("k_a2_shot_line_penalty", 30) # A2阻挡A1投篮路线的惩罚系数
+        self.h_params["k_a2_shot_line_penalty"] = kwargs.get("k_a2_shot_line_penalty", 90) # A2阻挡A1投篮路线的惩罚系数
         self.h_params["screen_pos_offset"] = kwargs.get("screen_pos_offset", self.h_params["agent_radius"] * 3) # 定义“理想掩护位置”在防守者身后的距离
         self.h_params["screen_pos_sigma"] = kwargs.get("screen_pos_sigma", self.h_params["R_spot"]) # 掩护位置奖励高斯函数的标准差
         self.h_params["k_screen_gate"] = kwargs.get("k_screen_gate", 7.0) # A2掩护位置门控的Sigmoid函数斜率，判断A2是否在A1和防守者之间
@@ -238,7 +251,7 @@ class Scenario(BaseScenario):
 
         # --- 4.6 封盖相关参数 ---
         self.h_params["def_proximity_threshold"] = kwargs.get("def_proximity_threshold", 3 * self.h_params["agent_radius"]) # 计算封盖时，判断防守者是否离A1足够近的距离阈值
-        self.h_params["block_sigma"] = kwargs.get("block_sigma", 0.60) # 封盖因子高斯函数的标准差，影响封盖判定的严格程度
+        self.h_params["block_sigma"] = kwargs.get("block_sigma", 0.30) # 封盖因子高斯函数的标准差，影响封盖判定的严格程度
         self.h_params["block_gate_k"] = kwargs.get("block_gate_k", 25.0) # 封盖软门控Sigmoid函数的斜率
         
         # ----------------- 环境构建 (World Setup) -----------------
@@ -304,21 +317,14 @@ class Scenario(BaseScenario):
         self.termination_reason_code = torch.zeros(batch_dim, device=device, dtype=torch.int32)
         self.a1_normalized_speed_k = torch.zeros(batch_dim, device=device)
         self.is_in_spot_a1 = torch.zeros(batch_dim,device=device)
+        self.a1_block_factor = torch.zeros(batch_dim, device=device)
 
 
         # self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit)
         self.jitted_reward_calculator = calculate_rewards_and_dones_jit
+        # self.jitted_reward_calculator = torch.jit.script(calculate_rewards_and_dones_jit)
 
         self.reward_hist = {}
-
-        self.plot_artists = []
-        for i, agent in enumerate(world.agents):
-            fig, ax = plt.subplots(figsize=(5, 3), dpi=80)
-            fig.tight_layout(pad=1)
-            line, = ax.plot([], [], 'r-') 
-            ax.set_title(f"Agent {agent.name}", fontsize=6)
-            artist_dict = {'fig': fig, 'ax': ax, 'line': line}
-            self.plot_artists.append(artist_dict)
 
         return world
 
@@ -465,7 +471,6 @@ class Scenario(BaseScenario):
         agent.controller.process_force()
 
     # @timer
-    # @torch.compile
     def pre_step(self):
         """
         在每个物理步长开始前执行。
@@ -502,7 +507,7 @@ class Scenario(BaseScenario):
         self.wall_collision_counters.copy_(wall_counters_clone)
 
         # 4. 调用核心JIT函数进行计算
-        dense_rewards, terminal_rewards, dones, a1_still_frames_counter, wall_collision_counters, defender_over_midline_counter, win_this_step, updated_reason_code, is_in_spot_a1 = \
+        dense_rewards, terminal_rewards, dones, a1_still_frames_counter, wall_collision_counters, defender_over_midline_counter, win_this_step, updated_reason_code, is_in_spot_a1, a1_block_factor = \
             self.jitted_reward_calculator(
                 self.h_params,
                 self.all_pos,
@@ -536,12 +541,24 @@ class Scenario(BaseScenario):
         self.win_this_step = win_this_step
         self.termination_reason_code = updated_reason_code.to(torch.int32)
         self.is_in_spot_a1 = is_in_spot_a1
+        self.a1_block_factor = a1_block_factor
 
         # # 可以在这里处理JIT函数无法执行的操作，比如打印
         # if torch.any(self.win_this_step):
         #     print(f"got {torch.sum(self.win_this_step).item()} wins in this step")
         
         self.dones_this_step.copy_(self.dones)
+
+        if not self.is_eval:
+            actual_shot_successes = torch.sum((self.dones & (self.termination_reason_code == 1))).item()
+            
+            if actual_shot_successes > 0:
+                self.cumulative_successes += actual_shot_successes
+                if self.cumulative_successes >= self.success_needed and self.v_shot_threshold_current > self.v_shot_threshold_target:
+                    self.v_shot_threshold_current = max(self.v_shot_threshold_target, self.v_shot_threshold_current - self.v_shot_step)
+                    self.h_params["v_shot_threshold"] = self.v_shot_threshold_current
+                    self.cumulative_successes = 0
+                    print(f" [Curriculum] REAL SHOT MADE! New Threshold: {self.v_shot_threshold_current:.2f} m/s")
 
     # @timer
     # @torch.compile
@@ -944,6 +961,22 @@ class Scenario(BaseScenario):
                     
                     overlay_geoms.append(bg_poly)
                     overlay_geoms.append(fg_poly)
+            # --- C. A1 封盖系数 ---
+            if i == 0:  # 仅针对 A1
+                block_f = self.a1_block_factor[env_index].item()
+                if block_f > 0.01:  # 只有存在封盖压力时才显示
+                    pos = agent.state.pos[env_index]
+                    # 设定圆圈半径：基础半径 + 封盖程度 * 缩放系数
+                    # 这里设定 block_f=1 时，圆圈半径比 agent 略大
+                    vis_radius = block_f * self.h_params["agent_radius"]
+                    
+                    # 创建空心黑色圆圈
+                    block_ring = rendering.make_circle(radius=vis_radius, filled=True)
+                    block_ring.set_color(0.0, 0.0, 0.0, 0.6) # 黑色，带透明度
+                    
+                    xform = rendering.Transform(translation=(pos[0].item(), pos[1].item()))
+                    block_ring.add_attr(xform)
+                    overlay_geoms.append(block_ring)
 
         # 严格按照层级返回: 
         # 底层(图表) -> 中层(状态圈) -> 顶层(文字)

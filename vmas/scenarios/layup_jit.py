@@ -176,11 +176,11 @@ def calculate_rewards_and_dones_jit(
         screen_gate = torch.sigmoid(-h_params['k_screen_gate'] * dot_product_gate)
         
         screen_bonus = h_params['k_a2_screen_bonus'] * torch.exp(-dist_a2_to_ideal_sq / (2 * h_params['a2_screen_sigma']**2)) * screen_gate
-        a2_reward = final_score_modified + screen_bonus + spacing_bonus + time_bonus
+        a2_reward = final_score_modified + screen_bonus + spacing_bonus + time_bonus + h_params['shoot_score']
         terminal_rewards[shot_b_idx, 1] += a2_reward
 
         # --- 计算防守方奖励 (D1 & D2) ---
-        time_elapsed_ratio = torch.clamp((h_params['t_limit'] - t_remaining[shot_b_idx].squeeze(-1)) / h_params['t_limit'],min=0.6)
+        time_elapsed_ratio = torch.clamp((h_params['t_limit'] - t_remaining[shot_b_idx].squeeze(-1)) / h_params['t_limit'],min=0.0)
         R_delay_bonus = h_params['k_def_delay_bonus'] * time_elapsed_ratio
         for i in range(n_defenders):
             R_block = h_params['k_def_block_reward'] * block_contribution[:, i] # 封盖贡献奖励
@@ -333,6 +333,35 @@ def calculate_rewards_and_dones_jit(
             
         terminal_rewards += foul_rewards
         dones_out[b_idx] = True
+    
+    # =================================================================================
+    # 新增约束：A1 读条期间（投篮准备中）防守方触碰 A1 即判负
+    # =================================================================================
+    # 1. 判定 A1 是否处于读条状态 (计数器 > 0 且 尚未完成投篮)
+    is_charging = (curr_still_counter > 0) & ~shot_attempted
+    
+    # 2. 检查 A1 (索引0) 是否与任何防守者 (索引 n_attackers 之后) 发生碰撞
+    # collision_matrix 维度 [batch, n_agents, n_agents]
+    coll_a1_with_defenders = collision_matrix[:, 0, n_attackers:].any(dim=1)
+    
+    # 3. 触发判定条件
+    charging_foul = is_charging & coll_a1_with_defenders & ~dones_out
+    
+    if torch.any(charging_foul):
+        f_idx = charging_foul.nonzero().squeeze(-1)
+        
+        # 结果设置
+        dones_out[f_idx] = True
+        attacker_win_this_step[f_idx] = True
+        reason_code[f_idx] = 2 
+        
+        # 奖励分配：防守方直接重罚 (赋值覆盖)
+        penalty_val = -h_params['R_foul']
+        def_rewards = terminal_rewards[f_idx, n_attackers:]
+        terminal_rewards[f_idx, n_attackers:] = torch.full_like(def_rewards, penalty_val)
+        
+        # 进攻方获得胜利奖励
+        terminal_rewards[f_idx, 0:n_attackers] += h_params['max_score']
 
     # --- 条件4: 持续撞墙导致回合结束 (Wall Collision Timeout) ---
     is_wall_timeout_per_agent = (wall_collision_counters >= h_params['wall_collision_frames'])
@@ -715,4 +744,4 @@ def calculate_rewards_and_dones_jit(
         time_bonus_defenders = h_params['k_defender_time_bonus'] * time_factor
         dense_reward[:, n_attackers:] += time_bonus_defenders.unsqueeze(1) * is_time_urgent.unsqueeze(1)
 
-    return dense_reward, terminal_rewards, dones_out, curr_still_counter, wall_collision_counters, defender_over_midline_counter, attacker_win_this_step, reason_code, is_in_spot_a1.float()
+    return dense_reward, terminal_rewards, dones_out, curr_still_counter, wall_collision_counters, defender_over_midline_counter, attacker_win_this_step, reason_code, is_in_spot_a1.float(), total_block_factor_a1
