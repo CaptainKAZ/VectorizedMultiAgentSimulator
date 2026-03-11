@@ -12,6 +12,7 @@ from vmas.simulator.controllers.velocity_controller import VelocityController
 import io
 import pyglet
 import numpy as np
+import os
 
 from vmas.scenarios.layup_jit import calculate_rewards_and_dones_jit
 import time
@@ -103,18 +104,28 @@ class Scenario(BaseScenario):
         # self.h_params["v_shot_threshold"] = kwargs.get("v_shot_threshold", 0.2) # 触发投篮所允许的最大速度
         self.is_eval = batch_dim < 32 # 判定是否为评估环境
         self.v_shot_threshold_target = kwargs.get("v_shot_threshold", 0.2)
-        
+
+        # 从环境变量读取初始 shot threshold（由 clear_restore.py 设置）
+        env_initial_threshold = os.environ.get('VMAS_INITIAL_SHOT_THRESHOLD')
+
         if self.is_eval:
             # 评估环境：始终使用最高难度
             self.v_shot_threshold_current = self.v_shot_threshold_target
             print(f" [Mode: EVAL] Initialized with target difficulty: {self.v_shot_threshold_current} m/s")
         else:
-            # 训练环境：从宽松条件开始
-            self.v_shot_threshold_current = .2
+            # 训练环境：从环境变量指定的初始值开始
+            if env_initial_threshold is not None:
+                self.v_shot_threshold_current = float(env_initial_threshold)
+                print(f" [Mode: TRAIN] Initialized from ENV: {self.v_shot_threshold_current} m/s (cold=0.6, cont=0.2)")
+            else:
+                # 默认值（向后兼容）
+                self.v_shot_threshold_current = 0.6
+                print(f" [Mode: TRAIN] Initialized with default: {self.v_shot_threshold_current} m/s (ENV not set)")
+
             self.v_shot_step = 0.05
             self.success_needed = max(1, batch_dim // 10)
             self.cumulative_successes = 0
-            print(f" [Mode: TRAIN] Initialized curriculum. Start: {self.v_shot_threshold_current} m/s, Goal: {self.v_shot_threshold_target} m/s")
+            print(f" [Mode: TRAIN] Curriculum: Start={self.v_shot_threshold_current} m/s, Goal={self.v_shot_threshold_target} m/s")
 
         self.h_params["v_shot_threshold"] = self.v_shot_threshold_current # 写入JIT参数字典
         self.h_params["a_shot_threshold"] = kwargs.get("a_shot_threshold", 2.0)  # 触发投篮所允许的最大动作指令模长
@@ -145,28 +156,29 @@ class Scenario(BaseScenario):
 
         # --- 3.2 进攻超时 ---
         self.h_params["defender_timeout_reward"] = kwargs.get("defender_timeout_reward", 9000.0) # 进攻超时，防守方获得的奖励
-        self.h_params["attacker_timeout_reward_max"] = kwargs.get("attacker_timeout_reward_max", 2500) # 进攻超时，进攻方惩罚/奖励的绝对值上限
-        self.h_params["k_timeout_move_vel_penalty"] = kwargs.get("k_timeout_move_vel_penalty", 200.0) # 超时瞬间，A1因速度过大受到的惩罚系数
+        self.h_params["attacker_timeout_reward_max"] = kwargs.get("attacker_timeout_reward_max", 9000) # 进攻超时，进攻方惩罚/奖励的绝对值上限
+        self.h_params["k_timeout_move_vel_penalty"] = kwargs.get("k_timeout_move_vel_penalty", 300.0) # 超时瞬间，A1因速度过大受到的惩罚系数
         self.h_params["k_timeout_move_act_penalty"] = kwargs.get("k_timeout_move_act_penalty", 0.0) # 超时瞬间，A1因动作指令过大受到的惩罚系数
-        self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 400.0) # 超时瞬间，A1在圈外时，根据距离远近受到的惩罚系数
+        self.h_params["k_timeout_dist_reward_factor"] = kwargs.get("k_timeout_dist_reward_factor", 1000.0) # 超时瞬间，A1在圈外时，根据距离远近受到的惩罚系数
         self.h_params["attacker_timeout_base_reward_out_spot"] = kwargs.get("attacker_timeout_base_reward_out_spot", -100.0) # 超时瞬间，A1在圈外的基础惩罚
-        self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", 200.0)    # 超时瞬间，A1在圈内的基础奖励/惩罚
-        self.h_params["k_a2_stalling_penalty"] = kwargs.get("k_a2_stalling_penalty", 100.0)    # 超时瞬间，A2在己方半场深度惩罚
+        self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get("attacker_timeout_reward_in_spot", 500.0)    # 超时瞬间，A1在圈内的基础奖励/惩罚
+        self.h_params["k_a2_stalling_penalty_timeup"] = kwargs.get("k_a2_stalling_penalty_timeup", 2000.0)    # 超时瞬间，A2在己方半场深度惩罚
 
         # --- 3.3 犯规 ---
-        self.h_params["R_foul"] = kwargs.get("R_foul", 6000.0) # 碰撞犯规的基础奖励/惩罚值
+        self.h_params["R_foul"] = kwargs.get("R_foul", 8000.0) # 碰撞犯规的基础奖励/惩罚值
         self.h_params["k_foul_vel_penalty"] = kwargs.get("k_foul_vel_penalty", 1000.0) # 碰撞犯规时，根据相对速度大小调整惩罚的系数
-        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.6) # 犯规发生时，被犯规方队友获得的奖励比例
+        self.h_params["foul_teammate_factor"] = kwargs.get("foul_teammate_factor", 0.9) # 犯规发生时，被犯规方获得的奖励比例
+        self.h_params["defender_fouled_bonus"] = kwargs.get("defender_fouled_bonus", 3000) # 犯规发生时，被犯规方是防守方有加成，鼓励防守方防守
         self.h_params["R_wall_collision_penalty"] = kwargs.get("R_wall_collision_penalty", -11000.0) # 因持续撞墙导致回合结束的惩罚
         self.h_params["R_midline_foul"] = kwargs.get("R_midline_foul", 12000.0) # 防守方因持续越线导致回合结束的惩罚
 
         # --- 3.4 投篮失败 (防守方终局奖励) ---
-        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 4000.0) # 防守方因封盖贡献获得的奖励系数
+        self.h_params["k_def_block_reward"] = kwargs.get("k_def_block_reward", 6000.0) # 防守方因封盖贡献获得的奖励系数
         self.h_params["k_def_force_reward"] = kwargs.get("k_def_force_reward", 2000.0) # 防守方因迫使A1远离篮筐投篮获得的奖励系数
         self.h_params["k_def_pos_reward"] = kwargs.get("k_def_pos_reward", 100.0)   # 防守方因占据理想防守位置获得的奖励系数
         self.h_params["k_def_area_reward"] = kwargs.get("k_def_area_reward", 150.0)  # 防守方因控制投篮区域获得的奖励系数
         self.h_params["k_def_shot_penalty"] = kwargs.get("k_def_shot_penalty", 3000.0)  # 对方投篮时，防守方受到的基础小额惩罚（鼓励积极防守）
-        self.h_params["k_def_delay_bonus"] = kwargs.get("k_def_delay_bonus", 3000.0)  # 对方投篮成功时，防守方根据拖延时间获得的奖励系数
+        self.h_params["k_def_delay_bonus"] = kwargs.get("k_def_delay_bonus", 7500.0)  # 对方投篮成功时，防守方根据拖延时间获得的奖励系数
 
 
         # =================================================================================
@@ -196,11 +208,11 @@ class Scenario(BaseScenario):
         self.h_params["charge_drawing_range"] = kwargs.get("charge_drawing_range", self.h_params["agent_radius"] * 6.0) # “造犯规”的有效距离
 
         # --- 4.2 进攻方 - A1 (持球人) ---
-        self.h_params["k_a1_speed_spot_reward"] = kwargs.get("k_a1_speed_spot_reward", 5000.0) # 吸引A1到投篮点的路程总奖励
+        self.h_params["k_a1_speed_spot_reward"] = kwargs.get("k_a1_speed_spot_reward", 6000.0) # 吸引A1到投篮点的路程总奖励
         self.h_params["gaussian_scale"] = kwargs.get("gaussian_scale", 600.0) # 吸引A1到投篮点的高斯奖励的峰值大小
         self.h_params["gaussian_sigma"] = kwargs.get("gaussian_sigma", 0.5 * self.h_params["R_spot"]) # 高斯奖励的宽度，决定了吸引力的范围
         self.h_params["k_a1_in_spot_reward"] = kwargs.get("k_a1_in_spot_reward", 3.0) # A1在投篮区域内时，每步获得的持续性奖励系数
-        self.h_params["k_a1_ready_to_shoot_reward"] = kwargs.get("k_a1_ready_to_shoot_reward", 500.0) # A1处于“准备投篮”状态时的奖励系数
+        self.h_params["k_a1_ready_to_shoot_reward"] = kwargs.get("k_a1_ready_to_shoot_reward", 200.0) # A1处于“准备投篮”状态时的奖励系数
         self.h_params["k_a1_velocity_stillness_reward"] = kwargs.get("k_a1_velocity_stillness_reward", 20.0) # 在投篮区内，A1速度越慢奖励越高的系数
         self.h_params["velocity_stillness_sigma"] = kwargs.get("velocity_stillness_sigma", 0.4) # 速度静止奖励高斯函数的标准差
         self.h_params["k_a1_action_stillness_reward"] = kwargs.get("k_a1_action_stillness_reward", 10) # 在投篮区内，A1动作指令越小奖励越高的系数
@@ -210,15 +222,15 @@ class Scenario(BaseScenario):
         self.h_params["k_a1_separation_reward"] = kwargs.get("k_a1_separation_reward", 60.0) # A1被封锁时，奖励其向远离防守者的方向移动
         self.h_params["k_a1_tangential_reward"] = kwargs.get("k_a1_tangential_reward", 120.0) # A1在受压迫时，奖励其横向移动以摆脱防守
         self.h_params["a1_tangential_pressure_sigma"] = kwargs.get("a1_tangential_pressure_sigma", self.h_params["agent_radius"] * 6) # 计算横向移动奖励时，防守压力距离衰减的标准差
-        self.h_params["k_a1_blocked_penalty"] = kwargs.get("k_a1_blocked_penalty", -70.0) # A1投篮路线被封锁时的惩罚系数
-        self.h_params["hesitate_speed_threshold"] = kwargs.get("hesitate_speed_threshold", 1.5) # 在非投篮区，低于此速度被认为是“犹豫”，将受惩罚
-        self.h_params["k_hesitation_penalty"] = kwargs.get("k_hesitation_penalty", 400) # A1犹豫不决的惩罚系数
+        self.h_params["k_a1_blocked_penalty"] = kwargs.get("k_a1_blocked_penalty", -90.0) # A1投篮路线被封锁时的惩罚系数
+        self.h_params["hesitate_speed_threshold"] = kwargs.get("hesitate_speed_threshold", 0.5) # 在非投篮区，低于此速度被认为是“犹豫”，将受惩罚
+        self.h_params["k_hesitation_penalty"] = kwargs.get("k_hesitation_penalty", 90) # A1犹豫不决的惩罚系数
         self.h_params["a1_proximity_threshold"] = kwargs.get("a1_proximity_threshold", self.h_params["agent_radius"] * 2.5) # 专门为A1设定的近距离惩罚触发距离
         self.h_params["a1_proximity_penalty_margin"] = kwargs.get("a1_proximity_penalty_margin", 0.01) # A1近距离惩罚的平滑边界宽度
         self.h_params["k_a1_proximity_penalty"] = kwargs.get("k_a1_proximity_penalty", 60) # A1的近距离惩罚系数
 
         # --- 4.3 进攻方 - A2 (无球人) ---
-        self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 200.0) # A2移动到最佳掩护位置的奖励系数
+        self.h_params["k_ideal_screen_pos"] = kwargs.get("k_ideal_screen_pos", 300.0) # A2移动到最佳掩护位置的奖励系数
         self.h_params["k_a2_interference_reward"] = kwargs.get("k_a2_interference_reward", 400.0) # A2靠近并干扰防守者的奖励系数
         self.h_params["k_repulsion_reward"] = kwargs.get("k_repulsion_reward", 800.0) # A2迫使防守者远离A1的“排斥”奖励系数
         self.h_params["repulsion_proximity_threshold"] = kwargs.get("repulsion_proximity_threshold", self.h_params["R_spot"]) # 触发排斥奖励时，A2需要离防守者足够近的距离
@@ -227,18 +239,19 @@ class Scenario(BaseScenario):
         self.h_params["screen_pos_sigma"] = kwargs.get("screen_pos_sigma", self.h_params["R_spot"]) # 掩护位置奖励高斯函数的标准差
         self.h_params["k_screen_gate"] = kwargs.get("k_screen_gate", 7.0) # A2掩护位置门控的Sigmoid函数斜率，判断A2是否在A1和防守者之间
         self.h_params["screen_spacing_gate_k"] = kwargs.get("screen_spacing_gate_k", 7.0) # A2掩护间距门控的Sigmoid函数斜率，判断A2是否离防守者比A1更近
+        self.h_params["k_a2_stalling_penalty"] = kwargs.get("k_a2_stalling_penalty", 100.0)    # A2在己方半场深度惩罚
 
         # --- 4.4 防守方 ---
-        self.h_params["k_positioning"] = kwargs.get("k_positioning", 190.0) # 防守方占据理想防守位置（A1与篮筐之间）的奖励系数
+        self.h_params["k_positioning"] = kwargs.get("k_positioning", 140.0) # 防守方占据理想防守位置（A1与篮筐之间）的奖励系数
         self.h_params["def_pos_offset"] = kwargs.get("def_pos_offset", self.h_params["agent_radius"] * 2.5) # 定义“理想防守位置”在A1身后的距离
         self.h_params["def_pos_sigma"] = kwargs.get("def_pos_sigma", 3 * self.h_params["agent_radius"]) # 防守位置奖励高斯函数的标准差
         self.h_params["k_def_pressure_reward"] = kwargs.get("k_def_pressure_reward", 30.0) # 防守方靠近A1施加压力的奖励系数
         self.h_params["def_pressure_range"] = kwargs.get("def_pressure_range", 6 * self.h_params["agent_radius"]) # 施加压力的有效最远距离
-        self.h_params["k_spot_control_reward"] = kwargs.get("k_spot_control_reward", 30.0) # 防守方成功阻止A1向篮筐移动的奖励系数
+        self.h_params["k_spot_control_reward"] = kwargs.get("k_spot_control_reward", 100.0) # 防守方成功阻止A1向篮筐移动的奖励系数
         self.h_params["def_guard_threshold"] = kwargs.get("def_guard_threshold", self.h_params["agent_radius"] * 6.0) # 判定防守方正在“盯防”A1的最大距离
         self.h_params["k_def_gaussian_spot"] = kwargs.get("k_def_gaussian_spot", 30) # 吸引防守方占据投篮点中心区域的高斯奖励系数
         self.h_params["def_gaussian_spot_sigma"] = kwargs.get("def_gaussian_spot_sigma", 1.0 * self.h_params["R_spot"]) # 防守方高斯奖励的宽度
-        self.h_params["k_def_a1_penetration_penalty"] = kwargs.get("k_def_a1_penetration_penalty", 5.0) # A1突破深入时，防守方受到的惩罚系数
+        self.h_params["k_def_a1_penetration_penalty"] = kwargs.get("k_def_a1_penetration_penalty", 30.0) # A1突破深入时，防守方受到的惩罚系数
         self.h_params["k_overextend_penalty"] = kwargs.get("k_overextend_penalty", 240.0) # 防守方越过中线太远的惩罚系数
         self.h_params["k_def_proximity_penalty"] = kwargs.get("k_def_proximity_penalty", 60.0) # 防守方的近距离惩罚系数
         self.h_params["proximity_penalty_reduction_in_spot"] = kwargs.get("proximity_penalty_reduction_in_spot", 0.2) # 在投篮区内，对防守方近距离惩罚的减免比例
@@ -246,13 +259,22 @@ class Scenario(BaseScenario):
 
         # --- 4.5 时间压力 ---
         self.h_params["time_penalty_grace_period"] = kwargs.get("time_penalty_grace_period", 8) # 回合开始后，免除时间惩罚的宽限期（秒）
-        self.h_params["k_attacker_time_penalty"] = kwargs.get("k_attacker_time_penalty", 1.6) # 宽限期后，若A1未进入投篮区，进攻方将受到时间惩罚
-        self.h_params["k_defender_time_bonus"] = kwargs.get("k_defender_time_bonus", 0.1)   # 宽限期后，防守方将获得持续的时间奖励
+        self.h_params["k_attacker_time_penalty"] = kwargs.get("k_attacker_time_penalty", 0.5) # 宽限期后，若A1未进入投篮区，进攻方将受到时间惩罚
+        self.h_params["k_defender_time_bonus"] = kwargs.get("k_defender_time_bonus", 0.5)   # 宽限期后，防守方将获得持续的时间奖励
 
         # --- 4.6 封盖相关参数 ---
         self.h_params["def_proximity_threshold"] = kwargs.get("def_proximity_threshold", 3 * self.h_params["agent_radius"]) # 计算封盖时，判断防守者是否离A1足够近的距离阈值
         self.h_params["block_sigma"] = kwargs.get("block_sigma", 0.30) # 封盖因子高斯函数的标准差，影响封盖判定的严格程度
         self.h_params["block_gate_k"] = kwargs.get("block_gate_k", 25.0) # 封盖软门控Sigmoid函数的斜率
+
+        # --- 4.7 封盖速度门控参数（防止奖励黑客：读条期间冲刺盖帽）---
+        self.h_params["v_block_threshold"] = kwargs.get("v_block_threshold", 0.5) # 封盖贡献的速度阈值，超过此速度将大幅降低封盖贡献
+        self.h_params["block_vel_gate_k"] = kwargs.get("block_vel_gate_k", 10.0) # 速度门控Sigmoid函数的斜率，越大门控越硬
+
+        # --- 4.8 读条期间防守方稳定站位奖励（鼓励提前占位而非冲刺盖帽）---
+        self.h_params["k_def_charging_stability"] = kwargs.get("k_def_charging_stability", 100.0) # 读条期间防守方保持理想站位的奖励系数
+        self.h_params["def_charging_stability_sigma"] = kwargs.get("def_charging_stability_sigma", 2 * self.h_params["agent_radius"]) # 稳定站位奖励的高斯宽度
+        self.h_params["def_charging_vel_threshold"] = kwargs.get("def_charging_vel_threshold", 0.5) # 读条期间防守方获得稳定奖励的速度上限
         
         # ----------------- 环境构建 (World Setup) -----------------
         self.max_steps = int(self.h_params["t_limit"] / self.dt)
@@ -405,13 +427,65 @@ class Scenario(BaseScenario):
         all_pos[:, 1, 0] = (torch.rand(batch_dim, device=device) - 0.5) * (W - 2 * r)
         all_pos[:, 1, 1] = -r - torch.rand(batch_dim, device=device) * (depth - r)
 
-        # Defenders: 简化网格分配 (移除 argsort 以提速)
-        def_x_base = torch.linspace(-W/2 + r*2, W/2 - r*2, self.n_defenders, device=device)
-        # 给每个防守者增加随机抖动
+        # --- Defenders: 完全随机化生成 + 向量化防碰撞 (Scatter & Resample) ---
+        # 1. 定义生成边界
+        def_margin_x = r * 1.5  # X轴安全边距
+        def_margin_y = r * 1.2  # Y轴安全边距
+
+        def_x_min = -W / 2 + def_margin_x
+        def_x_max = W / 2 - def_margin_x
+        # 限制在正半场的 spawn_area_depth 区域内
+        def_y_min = def_margin_y
+        def_y_max = depth - def_margin_y
+
+        # 防御性编程：确保生成区域有效 (防止 depth 设置过小导致 max < min)
+        def_y_max = max(def_y_max, def_y_min + 0.1)
+
+        # 2. 初始全量随机生成 [Batch, 2, 2]
+        # rand_raw: 0~1 分布
+        rand_raw = torch.rand((batch_dim, self.n_defenders, 2), device=device)
+
+        # 映射到场地实际坐标
+        # def_pos 形状: [batch_dim, 2, 2] (第二个维度是 D1, D2)
+        def_pos = torch.empty_like(rand_raw)
+        def_pos[..., 0] = rand_raw[..., 0] * (def_x_max - def_x_min) + def_x_min # X
+        def_pos[..., 1] = rand_raw[..., 1] * (def_y_max - def_y_min) + def_y_min # Y
+
+        # 3. 向量化碰撞检测与修复 (Iterative Resampling)
+        # 设定最小安全距离平方 (2倍半径 + 5%余量)
+        min_dist_sq = (2 * r * 1.05) ** 2
+
+        # 循环修复碰撞。由于空间很大且只有2人，通常 loop 1次即可解决。
+        # 设置 max_iter=3 防止极端死循环（虽然概率极低）
+        for _ in range(3):
+            # 计算 D1 和 D2 的欧几里得距离平方
+            d1_loc = def_pos[:, 0, :]
+            d2_loc = def_pos[:, 1, :]
+            dist_sq = torch.sum((d1_loc - d2_loc) ** 2, dim=1)
+
+            # 找到发生碰撞的环境索引 (Mask)
+            collision_mask = dist_sq < min_dist_sq
+            num_collisions = collision_mask.sum()
+
+            # 如果没有碰撞，直接退出循环
+            if num_collisions == 0:
+                break
+
+            # --- 仅对发生碰撞的环境，重新生成 D2 的位置 ---
+            # 生成新的随机坐标 [num_collisions, 2]
+            new_rand = torch.rand((num_collisions, 2), device=device)
+            new_pos_x = new_rand[:, 0] * (def_x_max - def_x_min) + def_x_min
+            new_pos_y = new_rand[:, 1] * (def_y_max - def_y_min) + def_y_min
+
+            # 更新 def_pos 张量
+            def_pos[collision_mask, 1, 0] = new_pos_x
+            def_pos[collision_mask, 1, 1] = new_pos_y
+
+        # 4. 将生成的坐标填入 all_pos
+        # 这种写法避免了 cat 操作，直接内存赋值
         for d_idx in range(self.n_defenders):
             agent_idx = self.n_attackers + d_idx
-            all_pos[:, agent_idx, 0] = def_x_base[d_idx] + (torch.rand(batch_dim, device=device) - 0.5) * (W/self.n_defenders * 0.5)
-            all_pos[:, agent_idx, 1] = r + torch.rand(batch_dim, device=device) * depth
+            all_pos[:, agent_idx] = def_pos[:, d_idx]
 
         # 统一应用位置和速度
         zero_vel = torch.zeros((batch_dim, 2), device=device)
@@ -603,7 +677,7 @@ class Scenario(BaseScenario):
         """
         获取环境的全局状态，适配 Attention Critic 的输入格式。
         (已更新为归一化版本)
-        
+
         返回:
             torch.Tensor: 归一化后的全局状态张量，形状为 [B, D]，
                         其中 D 是全局状态的总维度。
@@ -616,39 +690,47 @@ class Scenario(BaseScenario):
         pos_divisor = torch.tensor([max_x, max_y], device=device)
 
         # --- 2. 获取所有原始状态并进行归一化 ---
-        
-        # 归一化所有智能体的位置和速度
         all_pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)
         all_vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
 
         norm_all_pos = all_pos / pos_divisor
         norm_all_vel = all_vel / max_v
-        # norm_brake = (self.raw_breaks / 5.0).unsqueeze(-1)
-        # [B, N, 2] 和 [B, N, 2] -> [B, N, 4]
         agent_states = torch.cat([norm_all_pos, norm_all_vel], dim=-1)
 
-        # 扁平化智能体状态张量 [B, N, 4] -> [B, N * 4] = [B, 16]
+        # 融合 A1 的状态信息
+        a1_state = agent_states[:, 0].clone()
+        a1_state = torch.cat([
+            a1_state,
+            self.is_in_spot_a1.unsqueeze(-1),
+            (self.a1_still_frames_counter.unsqueeze(-1) / self.h_params["shot_still_frames"])
+        ], dim=-1)
+
+        # 其他实体保持原样
+        a2_state = agent_states[:, 1]
+        d1_state = agent_states[:, 2]
+        d2_state = agent_states[:, 3]
+
+        # 扁平化智能体状态张量
         batch_dim = self.world.batch_dim
-        flat_agent_states = agent_states.view(batch_dim, -1)
+        # 我们需要将每个状态单独处理，因为它们的维度不同
+        flat_a1 = a1_state.view(batch_dim, -1)  # 6维
+        flat_a2 = a2_state.view(batch_dim, -1)  # 4维
+        flat_d1 = d1_state.view(batch_dim, -1)  # 4维
+        flat_d2 = d2_state.view(batch_dim, -1)  # 4维
+
+        # 将所有状态拼接成一个张量
+        flat_agent_states = torch.cat([flat_a1, flat_a2, flat_d1, flat_d2], dim=-1)
 
         # 归一化其他关键状态信息
         spot_pos = self.spot_center.state.pos / pos_divisor
         basket_pos = self.basket.state.pos / pos_divisor
-        
-        # 这些已经是归一化或无需归一化的
-        is_in_spot_a1_obs = self.is_in_spot_a1.unsqueeze(-1)
         time_obs = self.t_remaining / self.h_params["t_limit"]
-
-        # 归一化的a1准备投篮读条
-        a1_shoot_process = self.a1_still_frames_counter.unsqueeze(-1) / self.h_params["shot_still_frames"]
 
         # --- 3. 拼接所有归一化后的特征 ---
         global_state = torch.cat([
-            flat_agent_states,  # 16维
-            spot_pos,           # 2维
-            is_in_spot_a1_obs,  # 1维
-            a1_shoot_process,   # 1维
-            basket_pos,         # 2维
+            flat_agent_states,  # 6+4+4+4=18维
+            spot_pos,         # 2维
+            basket_pos,       # 2维
             time_obs,           # 1维
         ], dim=-1)
 
@@ -676,18 +758,18 @@ class Scenario(BaseScenario):
         # --- 1. 获取所有原始状态 ---
         self_pos = agent.state.pos
         self_vel = agent.state.vel
-        
+
         if is_attacker:
             teammate_idx = 1 - agent_idx
             opp1_idx, opp2_idx = self.n_attackers, self.n_attackers + 1
-        else: 
+        else:
             teammate_idx = 1 - (agent_idx - self.n_attackers) + self.n_attackers
             opp1_idx, opp2_idx = 0, 1
-            
+
         teammate = self.world.agents[teammate_idx]
         opp1 = self.world.agents[opp1_idx]
         opp2 = self.world.agents[opp2_idx]
-        
+
         # 提取需要归一化的原始向量
         teammate_rel_pos = teammate.state.pos - self_pos
         teammate_rel_vel = self.p_vels[:, teammate_idx] - self_vel
@@ -697,18 +779,15 @@ class Scenario(BaseScenario):
         opp2_rel_vel = self.p_vels[:, opp2_idx] - self_vel
         spot_rel_pos = self.spot_center.state.pos - self_pos
         basket_rel_pos = self.basket.state.pos - self_pos
-        
+
         # --- 2. 定义归一化所需的最大值 ---
         max_pos_x = self.h_params["W"] / 2
         max_pos_y = self.h_params["L"] / 2
         max_vel = self.h_params["v_max"]
         device = self.world.device
-        
-        # 绝对坐标和速度的归一化除数
+
         abs_pos_divisor = torch.tensor([max_pos_x, max_pos_y], device=device)
-        # 相对坐标的最大范围是绝对坐标的两倍
         rel_pos_divisor = torch.tensor([2 * max_pos_x, 2 * max_pos_y], device=device)
-        # 相对速度的最大范围是绝对速度的两倍
         rel_vel_divisor = 2 * max_vel
 
         # --- 3. 对所有观察值进行归一化 ---
@@ -731,14 +810,14 @@ class Scenario(BaseScenario):
         # --- 4. 拼接成最终的观察向量 ---
         obs = torch.cat([
             self_obs,           # [4]
+            is_in_spot_a1,      # [1]
+            a1_shoot_process,   # [1]
+            time_obs,           # [1]
             teammate_obs,       # [4]
             opp1_obs,           # [4]
             opp2_obs,           # [4]
-            spot_obs,           # [2]
-            is_in_spot_a1,      # [1]
-            a1_shoot_process,   # [1]
+            spot_obs,           # [2]            
             norm_basket_rel_pos,# [2]
-            time_obs,           # [1]
         ], dim=-1)
 
         return obs.clone()

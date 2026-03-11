@@ -828,74 +828,76 @@ class Environment(TorchVectorizedObject):
 
         """
         if isinstance(env_index, list):
-            # 1. 强制获取每个环境的图像数据 (rgb_array)
-            frames = []
-            for idx in env_index:
-                frame = self.render(
-                    mode="rgb_array",
-                    env_index=idx,
-                    agent_index_focus=agent_index_focus,
-                    visualize_when_rgb=False, # 递归调用时不需要显示
-                    plot_position_function=plot_position_function,
-                    plot_position_function_precision=plot_position_function_precision,
-                    plot_position_function_range=plot_position_function_range,
-                    plot_position_function_cmap_range=plot_position_function_cmap_range,
-                    plot_position_function_cmap_alpha=plot_position_function_cmap_alpha,
-                    plot_position_function_cmap_name=plot_position_function_cmap_name,
-                )
-                frames.append(frame)
+            if max(env_index) < self.batch_dim:
+                # 1. 强制获取每个环境的图像数据 (rgb_array)
+                frames = []
+                for idx in env_index:
+                    frame = self.render(
+                        mode="rgb_array",
+                        env_index=idx,
+                        agent_index_focus=agent_index_focus,
+                        visualize_when_rgb=False, # 递归调用时不需要显示
+                        plot_position_function=plot_position_function,
+                        plot_position_function_precision=plot_position_function_precision,
+                        plot_position_function_range=plot_position_function_range,
+                        plot_position_function_cmap_range=plot_position_function_cmap_range,
+                        plot_position_function_cmap_alpha=plot_position_function_cmap_alpha,
+                        plot_position_function_cmap_name=plot_position_function_cmap_name,
+                    )
+                    frames.append(frame)
 
-            # 2. 拼接图像
-            tiled_img = self._tile_images(frames)
+                # 2. 拼接图像
+                tiled_img = self._tile_images(frames)
 
-            # 3. 根据模式输出
-            if mode == "rgb_array":
-                return tiled_img
-            
-            # 如果是 human 模式，我们需要把这张大图“画”到窗口里
-            # 初始化 Viewer (如果还没初始化)
-            if self.viewer is None:
-                self._init_rendering()
+                # 3. 根据模式输出
+                if mode == "rgb_array":
+                    return tiled_img
                 
-            from vmas.simulator.rendering import Image
-            
-            # 计算缩放比例以适应窗口
-            window_h, window_w = self.viewer.height, self.viewer.width
-            img_h, img_w, _ = tiled_img.shape
-            
-            # 保持纵横比缩放
-            scale = min(window_w / img_w, window_h / img_h)
-            
-            # 居中显示
-            display_w = img_w * scale
-            display_h = img_h * scale
-            off_x = (window_w - display_w) / 2
-            off_y = (window_h - display_h) / 2
-            
-            # 创建 Image Geom (vmas rendering.py 中的 Image 类支持 numpy 数组)
-            # 注意：rendering.py 的 Image 需要 (img, x, y, scale)
-            # 且 vmas 的 render loop 会在每次调用 viewer.render() 时清空 geoms，
-            # 但 onetime_geoms 会被清空，所以我们把它加到 onetime_geoms
-            
-            # 这里的坐标系原点通常在左下角，vmas 的 Image 也是基于此
-            # 但 numpy 数组通常是 (H, W, C)，vmas 的 Image 类里做了处理
-            
-            # 重要：为了防止递归调用 render 导致的上下文冲突，这里我们直接操作 viewer
-            self.viewer.window.clear()
-            self.viewer.window.switch_to()
-            self.viewer.dispatch_events()
-            
-            # 创建图像对象
-            image_geom = Image(tiled_img, x=off_x, y=off_y, scale=scale)
-            
-            # 使用 viewer 的正交投影设置进行绘制
-            # 这里我们手动模拟 viewer.render 的一部分，或者简单地利用 onetime 机制
-            # 为了简单起见，我们利用 onetime_geoms 并调用 render，
-            # 但这会导致 self.render 再次被调用吗？不会，因为我们现在就在 self.render 里。
-            
-            self.viewer.add_onetime(image_geom)
-            return self.viewer.render(return_rgb_array=False)
+                # 如果是 human 模式，我们需要把这张大图“画”到窗口里
+                # 初始化 Viewer (如果还没初始化)
+                if self.viewer is None:
+                    self._init_rendering()
+                    
+                from vmas.simulator.rendering import Image
+                
+                # 计算缩放比例以适应窗口
+                window_h, window_w = self.viewer.height, self.viewer.width
+                img_h, img_w, _ = tiled_img.shape
+                
+                # 保持纵横比缩放
+                scale = min(window_w / img_w, window_h / img_h)
+                
+                # 居中显示
+                display_w = img_w * scale
+                display_h = img_h * scale
+                off_x = (window_w - display_w) / 2
+                off_y = (window_h - display_h) / 2
+                
+                # 创建 Image Geom (vmas rendering.py 中的 Image 类支持 numpy 数组)
+                # 注意：rendering.py 的 Image 需要 (img, x, y, scale)
+                # 且 vmas 的 render loop 会在每次调用 viewer.render() 时清空 geoms，
+                # 但 onetime_geoms 会被清空，所以我们把它加到 onetime_geoms
+                
+                # 这里的坐标系原点通常在左下角，vmas 的 Image 也是基于此
+                # 但 numpy 数组通常是 (H, W, C)，vmas 的 Image 类里做了处理
+                
+                # 重要：为了防止递归调用 render 导致的上下文冲突，这里我们直接操作 viewer
+                self.viewer.window.clear()
+                self.viewer.window.switch_to()
+                self.viewer.dispatch_events()
+                
+                # 创建图像对象
+                image_geom = Image(tiled_img, x=off_x, y=off_y, scale=scale)
+                
+                # 使用 viewer 的正交投影设置进行绘制
+                # 这里我们手动模拟 viewer.render 的一部分，或者简单地利用 onetime 机制
+                # 为了简单起见，我们利用 onetime_geoms 并调用 render，
+                # 但这会导致 self.render 再次被调用吗？不会，因为我们现在就在 self.render 里。
+                
+                self.viewer.add_onetime(image_geom)
+                return self.viewer.render(return_rgb_array=False)
 
+            else: env_index = 0
         self._check_batch_index(env_index)
         assert (
             mode in self.metadata["render.modes"]

@@ -29,7 +29,7 @@ setup(
     author="Matteo Bettini",
     author_email="mb2389@cl.cam.ac.uk",
     packages=find_packages(),
-    install_requires=["numpy", "torch", "pyglet<=1.5.27", "gym", "six"],
+    install_requires=["numpy", "torch", "pyglet<=1.5.27", "gym", "six", "gym-notices==0.0.8"],
     extras_require={
         "gymnasium": ["gymnasium", "shimmy"],
         "rllib": ["ray[rllib]<=2.2"],

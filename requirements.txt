@@ -3,3 +3,4 @@ torch
 pyglet<=1.5.27
 gym
 six
+gym-notices==0.0.8
