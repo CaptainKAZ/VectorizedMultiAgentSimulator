@@ -193,7 +193,7 @@ def calculate_rewards_and_dones_jit(
 
         # --- 计算防守方奖励 (D1 & D2) ---
         time_elapsed_ratio = torch.clamp((h_params['t_limit'] - t_remaining[shot_b_idx].squeeze(-1)) / h_params['t_limit'],min=0.0)
-        R_delay_bonus = h_params['k_def_delay_bonus'] * time_elapsed_ratio
+        R_delay_bonus = h_params['k_def_delay_bonus'] * time_elapsed_ratio * time_elapsed_ratio
         for i in range(n_defenders):
             R_block = h_params['k_def_block_reward'] * block_contribution[:, i] # 封盖贡献奖励
             R_force = h_params['k_def_force_reward'] * (dist_a1_to_spot[shot_b_idx] / h_params['R_spot']) # 迫使远离投篮点奖励
