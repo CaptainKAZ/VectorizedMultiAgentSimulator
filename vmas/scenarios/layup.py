@@ -97,6 +97,10 @@ class Scenario(BaseScenario):
             "start_delay_frames", 10
         )  # 回合开始时，智能体需要等待的帧数，期间不响应动作
 
+        # --- [冒烟实验] 固定初始位置的开关（默认关闭，保持原有随机行为）---
+        self.fixed_init = kwargs.get("fixed_init", False)  # 固定 A2 / D1 / D2 初始位置
+        self.fixed_spot = kwargs.get("fixed_spot", False)  # 固定投篮点位置
+
         # --- 智能体物理属性 ---
         self.h_params["agent_radius"] = kwargs.get(
             "agent_radius", 0.3
@@ -156,12 +160,18 @@ class Scenario(BaseScenario):
         self.h_params["v_foul_threshold"] = kwargs.get(
             "v_foul_threshold", 0.5
         )  # 判定为碰撞犯规的最小相对速度
+        self.h_params["foul_approach_eps"] = kwargs.get(
+            "foul_approach_eps", 1e-3
+        )  # 判责平手阈值：两侧接近分量差值小于该值视为平手（改用整体速度决胜）
         self.h_params["wall_collision_frames"] = kwargs.get(
             "wall_collision_frames", 20.0
         )  # 持续撞墙导致回合结束的帧数阈值
+        self.h_params["v_wall_crash_threshold"] = kwargs.get(
+            "v_wall_crash_threshold", 0.5
+        )  # 首帧贴墙时，若撞击速度（上一帧速度模长，post_step 在清零前记录）超过该值，立即判撞墙失误
         self.h_params["max_time_over_midline"] = kwargs.get(
-            "max_time_over_midline", 20.0
-        )  # 防守方允许越过中线的最大帧数
+            "max_time_over_midline", 5.0
+        )  # 防守方允许越过中线的最大帧数（5 帧 ≈ 0.25s）
 
         # --- 2.3 胜负判定 ---
         self.h_params["win_condition_block_threshold"] = kwargs.get(
@@ -172,14 +182,15 @@ class Scenario(BaseScenario):
         # 3. 终局奖励设定 (Terminal Rewards)
         # =================================================================================
         # --- 3.1 投篮成功 ---
+        # [A方案 2026-09-29] 对齐胜率：抬高投篮类终局奖励（6000 -> 8000），让"投进"显著优于"蹲点超时"
         self.h_params["max_score"] = kwargs.get(
-            "max_score", 6000.0
+            "max_score", 8000.0
         )  # 投篮得分的基础分，离篮筐越近得分越高
         self.h_params["shoot_score"] = kwargs.get(
-            "shoot_score", 6000.0
+            "shoot_score", 9000.0
         )  # 成功出手投篮的固定额外奖励
         self.h_params["k_time_bonus"] = kwargs.get(
-            "k_time_bonus", 6000.0
+            "k_time_bonus", 8000.0
         )  # 投篮时间奖励系数，剩余时间越多奖励越高
         self.h_params["k_spacing_bonus"] = kwargs.get(
             "k_spacing_bonus", 1000.0
@@ -205,8 +216,8 @@ class Scenario(BaseScenario):
             "defender_timeout_reward", 9000.0
         )  # 进攻超时，防守方获得的奖励
         self.h_params["attacker_timeout_reward_max"] = kwargs.get(
-            "attacker_timeout_reward_max", 9000
-        )  # 进攻超时，进攻方惩罚/奖励的绝对值上限
+            "attacker_timeout_reward_max", 10000
+        )  # 进攻超时，进攻方惩罚/奖励的绝对值上限（[稍微罚多一点] 9000->10000）
         self.h_params["k_timeout_move_vel_penalty"] = kwargs.get(
             "k_timeout_move_vel_penalty", 300.0
         )  # 超时瞬间，A1因速度过大受到的惩罚系数
@@ -217,14 +228,14 @@ class Scenario(BaseScenario):
             "k_timeout_dist_reward_factor", 1000.0
         )  # 超时瞬间，A1在圈外时，根据距离远近受到的惩罚系数
         self.h_params["attacker_timeout_base_reward_out_spot"] = kwargs.get(
-            "attacker_timeout_base_reward_out_spot", -100.0
-        )  # 超时瞬间，A1在圈外的基础惩罚
+            "attacker_timeout_base_reward_out_spot", -7000.0
+        )  # 超时瞬间，A1在圈外的基础惩罚（[A方案] -100 -> -7000）
         self.h_params["attacker_timeout_reward_in_spot"] = kwargs.get(
-            "attacker_timeout_reward_in_spot", 2000.0
-        )  # 超时瞬间，A1在圈内的基础奖励/惩罚
+            "attacker_timeout_reward_in_spot", -5000.0
+        )  # 超时瞬间，A1在圈内的基础奖励/惩罚（[A方案] 2000 -> -4000；[稍微罚多一点] -> -5000）
         self.h_params["k_a2_stalling_penalty_timeup"] = kwargs.get(
-            "k_a2_stalling_penalty_timeup", 2000.0
-        )  # 超时瞬间，A2在己方半场深度惩罚
+            "k_a2_stalling_penalty_timeup", 2500.0
+        )  # 超时瞬间，A2在己方半场深度惩罚（[稍微罚多一点] 2000->2500）
 
         # --- 3.3 犯规 ---
         self.h_params["R_foul"] = kwargs.get(
@@ -239,6 +250,27 @@ class Scenario(BaseScenario):
         self.h_params["defender_fouled_bonus"] = kwargs.get(
             "defender_fouled_bonus", 2500
         )  # 犯规发生时，被犯规方是防守方有加成，鼓励防守方防守
+        # 【新增·跨智能体记账】主动犯规者的队友按比例分摊惩罚：避免"队友犯规、自己获利"
+        self.h_params["k_teammate_foul_share"] = kwargs.get(
+            "k_teammate_foul_share", 0.3
+        )
+        # 【新增·去对称】攻方主动犯规的惩罚倍率（防守方主动犯规不放大）
+        self.h_params["k_attacker_active_foul_scale"] = kwargs.get(
+            "k_attacker_active_foul_scale", 1.5
+        )
+        # 【新增·友军误伤加倍】友军误伤双方各按 k_friendly_fire_scale 倍基础量处罚（默认 2 倍），
+        # 让"撞队友"成为比任何犯规都更亏的选项（对照：守方主动犯规 -1M、攻方主动犯规 -1.5M）
+        self.h_params["k_friendly_fire_scale"] = kwargs.get(
+            "k_friendly_fire_scale", 2.0
+        )
+        # 【新增·收紧造犯规】被犯规方必须是近静止状态才配得上"造犯规奖金"
+        self.h_params["foul_draw_speed_threshold"] = kwargs.get(
+            "foul_draw_speed_threshold", 0.3
+        )
+        # 【新增·收紧造犯规】稠密造犯规奖励要求自身速度更接近静止（原复用 v_foul_threshold=0.5）
+        self.h_params["charge_draw_speed_threshold"] = kwargs.get(
+            "charge_draw_speed_threshold", 0.3
+        )
         self.h_params["R_wall_collision_penalty"] = kwargs.get(
             "R_wall_collision_penalty", -16000.0
         )  # 因持续撞墙导致回合结束的惩罚
@@ -263,8 +295,8 @@ class Scenario(BaseScenario):
             "k_def_shot_penalty", 9000.0
         )  # 对方投篮时，防守方受到的基础惩罚（鼓励积极防守）
         self.h_params["k_def_delay_bonus"] = kwargs.get(
-            "k_def_delay_bonus", 7000.0
-        )  # 对方投篮成功时，防守方根据拖延时间获得的奖励系数
+            "k_def_delay_bonus", 14000.0
+        )  # 对方投篮时，防守方根据拖延时间获得的奖励系数（7000→14000，配合 r^1.5 曲线，加强延误激励）
 
         # =================================================================================
         # 4. 稠密奖励与行为塑造 (Dense Rewards & Behavior Shaping)
@@ -326,8 +358,11 @@ class Scenario(BaseScenario):
             "stand_still_threshold", self.h_params["v_foul_threshold"]
         )  # 判定为“站定”状态的最大速度
         self.h_params["k_stand_still_reward"] = kwargs.get(
-            "k_stand_still_reward", 10.0
-        )  # 站定不动时，对正在冲过来的对手“造犯规”的奖励系数
+            "k_stand_still_reward", 150.0
+        )  # 站定不动时，对正在冲过来的对手“造犯规”的奖励系数（10 -> 150：原量级实测整局仅 ~+0.2，等同无效）
+        self.h_params["k_stand_still_attacker_scale"] = kwargs.get(
+            "k_stand_still_attacker_scale", 2.0
+        )  # 攻方(A1/A2，尤其无球的 A2)造犯规奖励的额外放大系数
         self.h_params["charge_drawing_range"] = kwargs.get(
             "charge_drawing_range", self.h_params["agent_radius"] * 6.0
         )  # “造犯规”的有效距离
@@ -355,8 +390,10 @@ class Scenario(BaseScenario):
             "velocity_stillness_sigma", 0.4
         )  # 速度静止奖励高斯函数的标准差
         self.h_params["k_a1_action_stillness_reward"] = kwargs.get(
-            "k_a1_action_stillness_reward", 10
+            "k_a1_action_stillness_reward", 50
         )  # 在投篮区内，A1动作指令越小奖励越高的系数
+        # [冒烟实验] 10 -> 50: 加大"收动作"的即时激励。
+        # 实测圈内仍有 12.6% 的帧动作超标(>2.71)导致读条清零, 原 0.005/步 的奖励太弱。
         self.h_params["k_a1_brake_in_spot_reward"] = kwargs.get(
             "k_a1_brake_in_spot_reward", 20
         )  # 在投篮区内，A1刹车奖励
@@ -367,14 +404,29 @@ class Scenario(BaseScenario):
             "low_u_threshold", 0.9
         )  # 判定A1有“停止意图”的动作指令模长阈值
         self.h_params["k_a1_separation_reward"] = kwargs.get(
-            "k_a1_separation_reward", 60.0
-        )  # A1被封锁时，奖励其向远离防守者的方向移动
+            "k_a1_separation_reward", 20.0
+        )  # A1被封锁时，奖励其向远离防守者的方向移动（60 -> 20：后撤会变成"退到己方半场"的捷径，降为辅助）
         self.h_params["k_a1_tangential_reward"] = kwargs.get(
-            "k_a1_tangential_reward", 120.0
-        )  # A1在受压迫时，奖励其横向移动以摆脱防守
+            "k_a1_tangential_reward", 150.0
+        )  # A1在受压迫/出手通道被遮挡时的横向机动奖励残量（120 -> 300 -> 900 -> 150：900 时视频里出现大量"原地摇摆刷分"，降为残量；摆脱价值改由下方"走廊净空奖励"表达）
         self.h_params["a1_tangential_pressure_sigma"] = kwargs.get(
-            "a1_tangential_pressure_sigma", self.h_params["agent_radius"] * 6
-        )  # 计算横向移动奖励时，防守压力距离衰减的标准差
+            "a1_tangential_pressure_sigma", self.h_params["agent_radius"] * 10
+        )  # 计算横向移动奖励时，防守压力距离衰减的标准差（1.8 -> 3.0 m：实测 dmin 平均 3.53 m，1.8 m 只有 55% 的帧拿到 >0.1 的门控）
+        self.h_params["lateral_lane_half_width"] = kwargs.get(
+            "lateral_lane_half_width", 1.5
+        )  # 横向移动门控基准：只认"垂距小于该值(真正站在A1->篮筐走廊里)"的防守者（避免挑到旁边1m但根本不在通道上的防守者）
+        self.h_params["k_a1_lateral_gate_max"] = kwargs.get(
+            "k_a1_lateral_gate_max", 2.0
+        )  # 横向移动奖励的门控上限（近身受压 + 被遮挡可叠加，最多放大 2 倍）
+        self.h_params["k_a1_lane_clear_reward"] = kwargs.get(
+            "k_a1_lane_clear_reward", 600.0
+        )  # 走廊净空奖励: 防守者贴近走廊(=威胁) + 走廊干净 + A1 沿走廊向前推进 时才给分（替代原全额横向速度奖励，上限 600 raw/帧且不能靠原地摇摆拿到）
+        self.h_params["a1_lane_clear_sigma"] = kwargs.get(
+            "a1_lane_clear_sigma", 1.0
+        )  # 判定"防守者挡在走廊里"的垂距衰减标准差（米）
+        self.h_params["a1_lane_clear_threat_sigma"] = kwargs.get(
+            "a1_lane_clear_threat_sigma", 3.0
+        )  # 防守者离走廊多近才算"构成威胁"的距离衰减标准差（米）
         self.h_params["k_a1_blocked_penalty"] = kwargs.get(
             "k_a1_blocked_penalty", -90.0
         )  # A1投篮路线被封锁时的惩罚系数
@@ -396,17 +448,39 @@ class Scenario(BaseScenario):
 
         # --- 4.3 进攻方 - A2 (无球人) ---
         self.h_params["k_ideal_screen_pos"] = kwargs.get(
-            "k_ideal_screen_pos", 300.0
-        )  # A2移动到最佳掩护位置的奖励系数
+            "k_ideal_screen_pos", 30.0
+        )  # A2移动到最佳掩护位置的奖励系数（300 -> 30：站位匹配=教人站位，降为辅助项）
         self.h_params["k_a2_interference_reward"] = kwargs.get(
-            "k_a2_interference_reward", 400.0
-        )  # A2靠近并干扰防守者的奖励系数
+            "k_a2_interference_reward", 40.0
+        )  # A2靠近并干扰防守者的奖励系数（400 -> 40：纯贴人，降为辅助项）
+        self.h_params["k_a2_body_check"] = kwargs.get(
+            "k_a2_body_check", 300.0
+        )  # [v16] A2贴住"正在封堵A1通道"的防守者(且自身近静止)的卡位奖励：用身体封掉对方一个横移方向
+        self.h_params["a2_body_check_still_sigma"] = kwargs.get(
+            "a2_body_check_still_sigma", 0.5
+        )  # 卡位奖励要求A2接近静止的速度尺度(m/s)
         self.h_params["k_repulsion_reward"] = kwargs.get(
-            "k_repulsion_reward", 800.0
-        )  # A2迫使防守者远离A1的“排斥”奖励系数
+            "k_repulsion_reward", 200.0
+        )  # A2迫使防守者远离A1的“排斥”奖励系数（800 -> 200：避免压过主项）
         self.h_params["repulsion_proximity_threshold"] = kwargs.get(
             "repulsion_proximity_threshold", self.h_params["R_spot"]
         )  # 触发排斥奖励时，A2需要离防守者足够近的距离
+        # [A2效果化] 主奖励：判据换成"防守有没有挡住 A1 的出手通道"，而不是 A2 站在哪个手写点上
+        self.h_params["k_a2_lane_clear"] = kwargs.get(
+            "k_a2_lane_clear", 400.0
+        )  # A2让防守者离开A1出手通道(1-block_factor)的奖励系数（主项）
+        self.h_params["a2_lane_clear_sigma"] = kwargs.get(
+            "a2_lane_clear_sigma", 1.0
+        )  # A2认领功劳的有效半径（A2与防守者距离的高斯权重）
+        self.h_params["a2_friendly_clearance"] = kwargs.get(
+            "a2_friendly_clearance", self.h_params["agent_radius"] * 3
+        )  # A2必须给A1让出的最小间距（友军误伤双方都罚，撞上即判负）
+        self.h_params["k_a2_friendly_clearance_penalty"] = kwargs.get(
+            "k_a2_friendly_clearance_penalty", 1000.0
+        )  # A2贴进A1该间距内的惩罚系数
+        self.h_params["k_foul_drawing_bonus"] = kwargs.get(
+            "k_foul_drawing_bonus", 6000.0
+        )  # A2作为被犯规方（造犯规成功，码2）时的额外终局奖金（需自身近静止，[去对称] 3000->6000）
         self.h_params["k_a2_shot_line_penalty"] = kwargs.get(
             "k_a2_shot_line_penalty", 90
         )  # A2阻挡A1投篮路线的惩罚系数
@@ -425,6 +499,10 @@ class Scenario(BaseScenario):
         self.h_params["k_a2_stalling_penalty"] = kwargs.get(
             "k_a2_stalling_penalty", 100.0
         )  # A2在己方半场深度惩罚
+        self.h_params["k_a2_dense_scale"] = kwargs.get(
+            "k_a2_dense_scale", 1.0
+        )  # [A2效果化] A2角色特有稠密塑形(通道清空/掩护/干扰/排斥/挡线)的整体缩放系数，1.0=原样
+        # 注意：只缩放A2角色特有项；通用物理惩罚(出界/动作/碰撞/推挤)与过中线门控不变
 
         # --- 4.4 防守方 ---
         self.h_params["k_positioning"] = kwargs.get(
@@ -475,8 +553,8 @@ class Scenario(BaseScenario):
             "time_penalty_grace_period", 8
         )  # 回合开始后，免除时间惩罚的宽限期（秒）
         self.h_params["k_attacker_time_penalty"] = kwargs.get(
-            "k_attacker_time_penalty", 0.5
-        )  # 宽限期后，若A1未进入投篮区，进攻方将受到时间惩罚
+            "k_attacker_time_penalty", 2.0
+        )  # 宽限期后，若A1未进入投篮区，进攻方将受到时间惩罚（[A方案] 0.5 -> 2.0）
         self.h_params["k_defender_time_bonus"] = kwargs.get(
             "k_defender_time_bonus", 0.5
         )  # 宽限期后，防守方将获得持续的时间奖励
@@ -689,6 +767,11 @@ class Scenario(BaseScenario):
         spot_pos[:, 0].clamp_(-limit_x, limit_x)
         spot_pos[:, 1].clamp_(limit_y_min, limit_y_max)
 
+        # --- [冒烟实验] 可选：固定投篮点位置 ---
+        if self.fixed_spot:
+            spot_pos[:, 0] = 0.0
+            spot_pos[:, 1] = y_center
+
         self.spot_center.set_pos(spot_pos, batch_index=env_index)
         self.shooting_area_vis.set_pos(spot_pos, batch_index=env_index)
 
@@ -768,6 +851,15 @@ class Scenario(BaseScenario):
             agent_idx = self.n_attackers + d_idx
             all_pos[:, agent_idx] = def_pos[:, d_idx]
 
+        # --- [冒烟实验] 可选：固定 A2 / D1 / D2 的初始位置 (A1 本来就是固定起点) ---
+        if self.fixed_init:
+            all_pos[:, 1, 0] = 0.0   # A2 x
+            all_pos[:, 1, 1] = -0.65 # A2 y (己方半场, 在合法生成区间内)
+            all_pos[:, 2, 0] = -2.0  # D1 x
+            all_pos[:, 2, 1] = 0.5   # D1 y (对方半场, 在合法生成区间内)
+            all_pos[:, 3, 0] = 2.0   # D2 x
+            all_pos[:, 3, 1] = 0.5   # D2 y
+
         # 统一应用位置和速度
         zero_vel = torch.zeros((batch_dim, 2), device=device)
         for i, agent in enumerate(self.world.agents):
@@ -788,7 +880,6 @@ class Scenario(BaseScenario):
 
         # 1. 分离速度和刹车信号 (刹车信号范围现在是 [-5, 5])
         target_vel = agent.action.u[:, :2]
-        # brake_signal = agent.action.u[:, 2]
         mag = torch.norm(target_vel, p=2, dim=1, keepdim=True)
         final_target_vel = target_vel * torch.pow(mag / self.h_params["v_max"], 1.5 - 1)
 
@@ -1061,7 +1152,8 @@ class Scenario(BaseScenario):
             dim=-1,
         )
 
-        return global_state.clone()
+        # [内存优化] 全局状态同样归一化到 [-1,1], 用 fp16 存储减半内存
+        return global_state.clone().half()
 
     def reward(self, agent: Agent):
         agent_idx = self.world.agents.index(agent)
@@ -1127,7 +1219,17 @@ class Scenario(BaseScenario):
         rel_pos_divisor = torch.tensor([2 * max_pos_x, 2 * max_pos_y], device=device)
         rel_vel_divisor = 2 * max_vel
 
-        self_obs = torch.cat([self_pos / abs_pos_divisor, self_vel / max_vel], dim=-1)
+        # [冒烟实验] 在自身观测中加入"上一帧动作"(目标速度, 用 v_max 归一化到 [-1,1])。
+        # 目的: 策略原先看不到自己的输出, 无法形成"保持小动作"的闭环反馈;
+        # 观测实测圈内 12.6% 的帧动作超标导致读条清零, 需要这个反馈来学会平稳输出。
+        self_obs = torch.cat(
+            [
+                self_pos / abs_pos_divisor,
+                self_vel / max_vel,
+                self.p_raw_actions[:, agent_idx, :] / max_vel,
+            ],
+            dim=-1,
+        )
 
         teammate_obs = torch.cat(
             [
@@ -1201,7 +1303,10 @@ class Scenario(BaseScenario):
             dim=-1,
         )
 
-        return obs.clone()
+        # [内存优化] 观测已归一化到 [-1,1], 用 fp16 存储可让 collector batch /
+        # buffer 中的观测内存减半 (观测占 batch 的约 87%)。
+        # 模型入口 (mlp/attention/gru) 会自动转回 fp32。
+        return obs.clone().half()
 
     def extra_render(self, env_index: int):
         from vmas.simulator import rendering

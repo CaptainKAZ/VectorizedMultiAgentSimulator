@@ -359,7 +359,7 @@
 | `defender_timeout_reward` | 8500 | 防守方超时奖励 |
 | `shot_still_frames` | 10 | 投篮准备帧数 |
 | `v_shot_threshold` | 0.2 | 投篮速度阈值 (训练时curriculum learning) |
-| `max_time_over_midline` | 20 | 防守方允许越线帧数 |
+| `max_time_over_midline` | 5 | 防守方允许越线帧数（5 帧 ≈ 0.25s） |
 
 ---
 
