@@ -113,7 +113,8 @@ class VelocityController:
         self.accum_errs = self.accum_errs.to(self.world.device)
         self.prev_err = self.prev_err.to(self.world.device)
 
-        des_vel = self.agent.action.u
+        # [投篮按键] 动作可能有第 3 通道（A1 的离散投篮键），只取前 dim_p 维做速度控制
+        des_vel = self.agent.action.u[..., : self.world.dim_p]
         cur_vel = self.agent.state.vel
 
         # apply control

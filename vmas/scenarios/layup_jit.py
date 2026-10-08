@@ -26,6 +26,8 @@ def calculate_rewards_and_dones_jit(
     vel_diffs_norm: torch.Tensor,
     requested_accelerations_tensor: torch.Tensor,
     a1_normalized_speed_k: torch.Tensor,
+    # [投篮按键] A1 本帧是否有效按下投篮键（在圈内且按键=1）
+    a1_press: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     JIT兼容的全向量化函数，用于并行计算奖励和回合终止信号。
@@ -78,9 +80,10 @@ def calculate_rewards_and_dones_jit(
     not_accelerating = (torch.linalg.norm(raw_actions[:, 0, :], dim=1) < h_params['a_shot_threshold']) | is_braking[:, 0]
     is_ready_to_shoot = in_area & is_still & not_accelerating
     
-    # 更新A1静止计数器，如果满足准备条件则+1，否则清零
+    # [投篮按键] 只有"A1 按住按键"时才推进读条；松手/出圈/不满足静止条件 -> 清零
+    press_active = a1_press & is_ready_to_shoot & ~dones_out
     prev_still_counter = a1_still_frames_counter
-    curr_still_counter = torch.where(is_ready_to_shoot, prev_still_counter + 1, 0)
+    curr_still_counter = torch.where(press_active, prev_still_counter + 1, 0)
     
     # 如果静止帧数达到阈值，则触发投篮
     shot_attempted = (curr_still_counter >= h_params['shot_still_frames']) & ~dones_out
@@ -141,6 +144,16 @@ def calculate_rewards_and_dones_jit(
         )
         total_block_factor = torch.clamp(block_contribution.sum(dim=1), 0, 1)
 
+        # 几何干扰度（不含速度门控）：只看"是否贴身 + 是否挡住出手线路"，用于
+        #   1) 延误奖励打折——只在形成干扰时才拿延误奖励，避免奖励"退开看投"
+        #   2) 放投基础罚分的少量减免（≤ k_def_contest_discount_max）
+        # 不含 velocity_gate 的原因：速度门控是"合法封盖判定"用的，冲刺补防(GOOD CLOSE-OUT)同样属于有效干扰
+        contest_geom = (
+            torch.exp(-dist_perp_sq / (2 * h_params['block_sigma']**2))
+            * is_blocker_per_defender.float()
+            * soft_proximity_gate
+        ).clamp(0.0, 1.0)
+
         # --- 判断胜负并分配原因码 ---
         is_a_winning_shot = total_block_factor < h_params['win_condition_block_threshold']
         winning_shot_indices = shot_b_idx[is_a_winning_shot]
@@ -151,6 +164,12 @@ def calculate_rewards_and_dones_jit(
             reason_code[winning_shot_indices] = 1 # 原因码1: 投篮命中
         if losing_shot_indices.numel() > 0:
             reason_code[losing_shot_indices] = 11 # 原因码11: 投篮被盖
+
+        # [2026-10-03 用户] 被盖惩罚：命中/被盖共用同一套奖励公式，这里给"被盖"的那部分额外扣一点分，
+        # 让 A1/A2 从"被盖仍净赚"变成小负分，保持改进出手质量的动力。
+        blocked_penalty = h_params['k_blocked_shot_penalty'] * (~is_a_winning_shot).float()
+        # [2026-10-04 用户] A1 维持原惩罚；A2 单独更重（掩护/卡位没做好的代价）
+        blocked_penalty_a2 = h_params['k_blocked_shot_penalty_a2'] * (~is_a_winning_shot).float()
         
         # --- 计算进攻方奖励 (A1 & A2) ---
         base_score = h_params['max_score'] * (1 - dist_a1_to_spot[shot_b_idx] / h_params['R_spot'])
@@ -167,7 +186,7 @@ def calculate_rewards_and_dones_jit(
         vel_stillness_bonus = h_params['k_shot_stillness_vel_bonus'] * torch.exp(-a1_speed_shot)
         act_stillness_bonus = h_params['k_shot_stillness_act_bonus'] * torch.exp(-a1_action_norm_shot)
         
-        a1_reward = final_score_modified + spacing_bonus + time_bonus + vel_stillness_bonus + act_stillness_bonus + h_params['shoot_score']
+        a1_reward = final_score_modified + spacing_bonus + time_bonus + vel_stillness_bonus + act_stillness_bonus + h_params['shoot_score'] - blocked_penalty
         terminal_rewards[shot_b_idx, 0] += a1_reward
 
         # A2 掩护奖励：判断A2是否为A1挡住了最关键的防守者
@@ -189,11 +208,13 @@ def calculate_rewards_and_dones_jit(
         
         screen_bonus = h_params['k_a2_screen_bonus'] * torch.exp(-dist_a2_to_ideal_sq / (2 * h_params['a2_screen_sigma']**2)) * screen_gate
         a2_reward = final_score_modified + screen_bonus + spacing_bonus + time_bonus + h_params['shoot_score']
-        terminal_rewards[shot_b_idx, 1] += a2_reward * a2_in_def_half_at_shot.float()
+        # 被盖时 A2 吃同样的负分（不受"是否在防守半场"门控：团队出手失败共同承担）
+        terminal_rewards[shot_b_idx, 1] += a2_reward * a2_in_def_half_at_shot.float() - blocked_penalty_a2
 
         # --- 计算防守方奖励 (D1 & D2) ---
         time_elapsed_ratio = torch.clamp((h_params['t_limit'] - t_remaining[shot_b_idx].squeeze(-1)) / h_params['t_limit'],min=0.0)
         # 延误奖励：r^1.5（原为 r^2），提高中后段斜率，鼓励防守方把出手时间尽量往后拖
+        # 注意：实际发放时按各防守者的几何干扰度打折（见下方 R_delay_i），延误奖励不再对冲"退开看投"的放投罚分
         R_delay_bonus = h_params['k_def_delay_bonus'] * torch.pow(time_elapsed_ratio, 1.5)
         for i in range(n_defenders):
             R_block = h_params['k_def_block_reward'] * block_contribution[:, i] # 封盖贡献奖励
@@ -216,7 +237,14 @@ def calculate_rewards_and_dones_jit(
             dist_def_to_spot_sq = torch.sum((defender_pos_shot[:, i, :] - spot_pos_shot)**2, dim=-1)
             R_area_control = h_params['k_def_area_reward'] * torch.exp(-dist_def_to_spot_sq / (2 * h_params['def_gaussian_spot_sigma']**2))
             
-            total_def_reward = R_block + R_force + R_positioning + R_area_control - h_params['k_def_shot_penalty'] + R_delay_bonus
+            contest_i = contest_geom[:, i]  # 该防守者的几何干扰度 [0,1]
+            # 延误奖励：保底部分（k_def_delay_floor）无条件发放——延误永远好过不延误；
+            # 其余部分按几何干扰度发放——出手时贴身/挡住线路拿得更多，"退开看投"只拿保底
+            delay_floor = h_params['k_def_delay_floor']
+            R_delay_i = R_delay_bonus * (delay_floor + (1.0 - delay_floor) * contest_i)
+            # 放投基础罚分：干扰度最多减免 k_def_contest_discount_max（默认 10%），保持净负期望
+            shot_penalty_i = h_params['k_def_shot_penalty'] * (1.0 - h_params['k_def_contest_discount_max'] * contest_i)
+            total_def_reward = R_block + R_force + R_positioning + R_area_control - shot_penalty_i + R_delay_i
             terminal_rewards[shot_b_idx, n_attackers + i] += total_def_reward
         
         dones_out |= shot_attempted
@@ -275,9 +303,10 @@ def calculate_rewards_and_dones_jit(
     # 1. 判定 A1 是否处于读条状态 (计数器 > 0 且 尚未完成投篮)
     is_charging = (curr_still_counter > 0) & ~shot_attempted
     
-    # 2. 检查 A1 (索引0) 是否与任何防守者 (索引 n_attackers 之后) 发生碰撞
+    # 2. 检查 A1 (索引0) 是否与哪些防守者 (索引 n_attackers 之后) 发生碰撞
     # collision_matrix 维度 [batch, n_agents, n_agents]
-    coll_a1_with_defenders = collision_matrix[:, 0, n_attackers:].any(dim=1)
+    coll_a1_per_defender = collision_matrix[:, 0, n_attackers:]   # [batch, n_defenders]
+    coll_a1_with_defenders = coll_a1_per_defender.any(dim=1)
     
     # 3. 触发判定条件
     charging_foul = is_charging & coll_a1_with_defenders & ~dones_out
@@ -290,42 +319,84 @@ def calculate_rewards_and_dones_jit(
         attacker_win_this_step[f_idx] = True
         reason_code[f_idx] = 2 
         
-        # 奖励分配：防守方直接重罚 (赋值覆盖)
+        # 奖励分配：只罚"真正碰到 A1 的那位防守者"（可能一位或两位），
+        # 没碰到的防守者保持自身奖励不变（原来是把两名防守者全部覆盖为 -R_foul）
         penalty_val = -h_params['R_foul']
+        touch_mask = coll_a1_per_defender[f_idx]                      # [n_foul, n_defenders]
         def_rewards = terminal_rewards[f_idx, n_attackers:]
-        terminal_rewards[f_idx, n_attackers:] = torch.full_like(def_rewards, penalty_val)
+        terminal_rewards[f_idx, n_attackers:] = torch.where(
+            touch_mask,
+            torch.full_like(def_rewards, penalty_val),
+            def_rewards,
+        )
         
         # 进攻方获得胜利奖励
         terminal_rewards[f_idx, 0:n_attackers] += h_params['max_score']
 
     # --- 条件3: 碰撞犯规 (Foul) ---
-    # is_foul 条件: 发生碰撞 & 相对速度超过阈值 & 回合尚未结束
-    is_foul = collision_matrix & (vel_diffs_norm > h_params['v_foul_threshold']) & ~dones_out.view(-1, 1, 1)
-    if torch.triu(is_foul, diagonal=1).any():
-        foul_indices = torch.triu(is_foul, diagonal=1).nonzero()
-        b_idx, i_idx, j_idx = foul_indices.T # JIT 兼容的解包
+    # [方案A·2026-10-04] 门槛与判责统一到"接近分量"（approach）：
+    #   旧口径: is_foul = 接触 & (相对速度 |Δv| > v_foul_threshold)
+    #   新口径: is_foul = 接触 & (主动方的接近分量 > foul_approach_threshold)
+    # 理由见 layup.py 中 foul_approach_threshold 的注释（两量不嵌套；旧门槛判的 86% 是擦身）。
+    contact_pairs = torch.triu(
+        collision_matrix & ~dones_out.view(-1, 1, 1), diagonal=1
+    )
+    if torch.any(contact_pairs):
+        foul_indices = contact_pairs.nonzero()
+        b_all, i_all, j_all = foul_indices.T # JIT 兼容的解包
 
-        # 犯规惩罚大小与相对速度挂钩
-        relative_speeds = vel_diffs_norm[b_idx, i_idx, j_idx]
-        dynamic_foul_magnitude = h_params['R_foul'] + h_params['k_foul_vel_penalty'] * relative_speeds
-        
-        # 判断谁是主动撞人者 (active)
-        # 对称判责：沿接触连线分别计算双方"朝对方"的接近分量（用接触前速度 p_vels），
-        # 接近分量更大的一方主动（负责）；两侧接近程度几乎相同（差 < foul_approach_eps）时，
-        # 由整体速度更大的一方负责。eps 仅用于消除数值噪声，不做语义阈值。
-        pos_rel = all_pos[b_idx, j_idx] - all_pos[b_idx, i_idx]
+        # 判责（1）：对称基线 —— 沿接触连线分别计算双方"朝对方"的接近分量（用接触前速度
+        # p_vels），接近分量更大的一方主动（负责）；两侧接近程度几乎相同
+        # （差 < foul_approach_eps）时，由整体速度更大的一方负责。eps 仅消数值噪声。
+        pos_rel = all_pos[b_all, j_all] - all_pos[b_all, i_all]
         contact_dir = pos_rel / (torch.linalg.norm(pos_rel, dim=-1, keepdim=True) + 1e-6)
-        vel_i = p_vels[b_idx, i_idx]
-        vel_j = p_vels[b_idx, j_idx]
+        vel_i = p_vels[b_all, i_all]
+        vel_j = p_vels[b_all, j_all]
         approach_i = torch.clamp(torch.einsum("bd,bd->b", vel_i, contact_dir), min=0.0)
         approach_j = torch.clamp(-torch.einsum("bd,bd->b", vel_j, contact_dir), min=0.0)
         speed_i = torch.linalg.norm(vel_i, dim=-1)
         speed_j = torch.linalg.norm(vel_j, dim=-1)
+        approach_max = torch.maximum(approach_i, approach_j)
         approach_tied = torch.abs(approach_i - approach_j) <= h_params['foul_approach_eps']
-        i_is_active = torch.where(approach_tied, speed_i >= speed_j, approach_i > approach_j)
-        active_indices = torch.where(i_is_active, i_idx, j_idx)
-        passive_indices = torch.where(i_is_active, j_idx, i_idx)
-        
+        i_active_sym = torch.where(approach_tied, speed_i >= speed_j, approach_i > approach_j)
+        active_idx = torch.where(i_active_sym, i_all, j_all)
+
+        # 判责（2）：[方案A+] 篮球式"合法防守位"豁免（仅跨队接触生效）。
+        #   防守方"没站稳"的程度 violation_D = max(0, |v_D| - v_legal) + max(0, approach_D - a_legal)
+        #   进攻方责任分 score_A = approach_A - k_legal_def_exempt * violation_D
+        #   当 score_A <= approach_D 时，责任归防守方（进攻方豁免成功）。
+        #   即：防守方自己动得越快/越迎面冲，进攻方需要"多主动"才被追责。
+        i_is_att = i_all < n_attackers
+        j_is_att = j_all < n_attackers
+        cross_team = i_is_att != j_is_att
+        def_is_j = i_is_att & cross_team
+        approach_atk = torch.where(def_is_j, approach_i, approach_j)
+        approach_def = torch.where(def_is_j, approach_j, approach_i)
+        speed_def = torch.where(def_is_j, speed_j, speed_i)
+        violation_def = (
+            torch.clamp(speed_def - h_params['foul_legal_def_speed'], min=0.0)
+            + torch.clamp(approach_def - h_params['foul_legal_def_approach'], min=0.0)
+        )
+        score_atk = approach_atk - h_params['k_legal_def_exempt'] * violation_def
+        def_exempt_wins = cross_team & (score_atk <= approach_def)
+        def_pair_idx = torch.where(def_is_j, j_all, i_all)
+        active_idx = torch.where(def_exempt_wins, def_pair_idx, active_idx)
+        passive_idx = torch.where(active_idx == i_all, j_all, i_all)
+
+        # 门槛：[方案A] 只有碰撞的接近强度（双方较大者）超过阈值才算严重碰撞/犯规。
+        # 横滑擦身（双方都没往对方身上去）不判犯规，交由稠密层的近距/推挤惩罚处理。
+        is_serious = approach_max > h_params['foul_approach_threshold']
+        b_idx = b_all[is_serious]
+        i_idx = i_all[is_serious]
+        j_idx = j_all[is_serious]
+        active_indices = active_idx[is_serious]
+        passive_indices = passive_idx[is_serious]
+
+        # [方案A] 犯规惩罚大小与碰撞接近强度挂钩（原来用相对速度 |Δv|）
+        dynamic_foul_magnitude = (
+            h_params['R_foul'] + h_params['k_foul_vel_penalty'] * approach_max[is_serious]
+        )
+
         active_is_attacker = active_indices < n_attackers
         passive_is_attacker = passive_indices < n_attackers
         is_friendly_fire = (active_is_attacker == passive_is_attacker)
@@ -816,7 +887,23 @@ def calculate_rewards_and_dones_jit(
 
     # b. 干扰和排斥奖励 (Interference & Repulsion)
     dist_a2_to_def = torch.linalg.norm(p_a2_exp - defender_pos, dim=-1)
-    interference_reward, _ = torch.max(h_params['k_a2_interference_reward'] * torch.exp(-dist_a2_to_def.pow(2) / (2 * h_params['screen_pos_sigma']**2)), dim=1)
+
+    # [硬门控·2026-10-04 用户] 仅"靠近"不再给钱：干扰/卡位奖励必须落在"防守者 -> A1"的连线上
+    #   （A2 真的挡在防守者回追 A1 的路径上；垂距近 + 落在线段内），否则两项奖励为 0。
+    _vec_def_to_a1 = -def_to_a1_vec                                       # A1 - D
+    _dist_def_to_a1 = torch.linalg.norm(_vec_def_to_a1, dim=-1, keepdim=True) + 1e-6
+    _unit_def_to_a1 = _vec_def_to_a1 / _dist_def_to_a1
+    _rel_a2_from_def = p_a2_exp - defender_pos                            # A2 - D
+    _proj_a2_def_line = torch.sum(_rel_a2_from_def * _unit_def_to_a1, dim=-1)
+    _perp_a2_def_line = torch.linalg.norm(
+        _rel_a2_from_def - _proj_a2_def_line.unsqueeze(-1) * _unit_def_to_a1, dim=-1
+    )
+    between_gate = (
+        torch.exp(-_perp_a2_def_line.pow(2) / (2 * h_params['a2_between_gate_sigma']**2))
+        * torch.sigmoid(h_params['a2_between_gate_k'] * _proj_a2_def_line)
+        * torch.sigmoid(h_params['a2_between_gate_k'] * (_dist_def_to_a1.squeeze(-1) - _proj_a2_def_line))
+    )
+    interference_reward, _ = torch.max(h_params['k_a2_interference_reward'] * torch.exp(-dist_a2_to_def.pow(2) / (2 * h_params['screen_pos_sigma']**2)) * between_gate, dim=1)
 
     # b2. [v16] 卡位奖励: 贴住"正在封堵A1出手通道"的那个防守者, 且自身近静止(合法卡位, 不会自己撞人犯规)。
     #      语义: A2 用身体封掉防守者的一个横移方向, 给 A1 留出从另一侧晃开的空间。
@@ -825,7 +912,7 @@ def calculate_rewards_and_dones_jit(
     block_share = block_factor_a1 / (block_factor_a1.sum(dim=1, keepdim=True) + 1e-6)
     body_check_reward = (
         h_params['k_a2_body_check']
-        * (block_share * torch.exp(-dist_a2_to_def.pow(2) / (2 * h_params['screen_pos_sigma']**2))).sum(dim=1)
+        * (block_share * torch.exp(-dist_a2_to_def.pow(2) / (2 * h_params['screen_pos_sigma']**2)) * between_gate).sum(dim=1)
         * a2_still_gate
     )
     
@@ -842,7 +929,43 @@ def calculate_rewards_and_dones_jit(
     proximity_factor_a2 = torch.exp(-torch.linalg.norm(a2_vec, dim=-1).pow(2) / (2 * (2 * h_params['agent_radius'])**2))
     line_block_factor = is_between_a2.float() * torch.exp(-dist_perp_sq_a2 / (2 * (0.5 * h_params['agent_radius'])**2))
     line_penalty = h_params['k_a2_shot_line_penalty'] * line_block_factor * proximity_factor_a2
-    
+
+    # f. [2026-10-04 拉开空间] A1 过线后，盯防 A1 的防守者（离 A1 最近）若在"远离 A1"，给 A2 发钱；
+    #    若在"扑向 A1"，给少量负奖励（负向钳制，不会太多）。A2 因此有动力把防守从 A1 身上拉走。
+    _defender_vel = all_vel[:, n_attackers:, :]                           # (B, n_def, 2)
+    _sep_speed = torch.sum(_defender_vel * (-_unit_def_to_a1), dim=-1)    # v_D · unit(A1->D)：>0 = 远离 A1
+    _primary_guard_idx = torch.argmin(torch.linalg.norm(def_to_a1_vec, dim=-1), dim=1)
+    _primary_sep = _sep_speed.gather(1, _primary_guard_idx.unsqueeze(1)).squeeze(1)
+    spread_reward = torch.where(
+        a1_pos[:, 1] > 0,
+        h_params['k_a2_spread_reward'] * torch.clamp(_primary_sep, min=0.0)
+        + h_params['k_a2_spread_penalty'] * torch.clamp(_primary_sep, min=-h_params['a2_spread_neg_cap'], max=0.0),
+        torch.zeros_like(_primary_sep),
+    )
+
+    # g. [2026-10-04 走廊即时支援] A1 过线后，A2 待在 A1->投篮点的进攻走廊附近、且出手通道已清空 -> 即时奖励
+    #    （把"配合/拉开"的梯度从终局挪到每一步）
+    _corr_vec = spot_center_pos - a1_pos
+    _corr_len2 = torch.sum(_corr_vec * _corr_vec, dim=-1, keepdim=True) + 1e-6
+    _rel_a2_corr = a2_pos - a1_pos
+    _proj_corr = torch.clamp(torch.sum(_rel_a2_corr * _corr_vec, dim=-1, keepdim=True) / _corr_len2, min=0.0, max=1.0)
+    _perp_corr = torch.linalg.norm(_rel_a2_corr - _proj_corr * _corr_vec, dim=-1)
+    _near_corr = torch.exp(-_perp_corr.pow(2) / (2 * h_params['a2_support_lane_sigma']**2))
+    _shot_channel_clear = torch.exp(
+        -torch.clamp(total_block_factor_a1, min=0.0, max=1.0).pow(2) / (2 * h_params['a2_support_clear_sigma']**2)
+    )
+    support_reward = h_params['k_a2_support_reward'] * _near_corr * _shot_channel_clear * (a1_pos[:, 1] > 0).float()
+
+    # h. [2026-10-04 造撞渠道重构] 防守者朝 A2 冲来的速度 × 距离衰减，直接即时发放；
+    #    不再要求 A2 近静止（原站立造犯规渠道实测近静止帧仅 0.4%，形同废置）。
+    _toward_a2 = -vec_a2_to_def / (dist_a2_to_def.unsqueeze(-1) + 1e-6)
+    _appr_speed = torch.clamp(
+        torch.sum(all_vel[:, n_attackers:] * _toward_a2, dim=-1),
+        min=0.0, max=h_params['a2_draw_speed_cap'],
+    )
+    _draw_falloff = torch.clamp(1.0 - dist_a2_to_def / h_params['charge_drawing_range'], min=0.0)
+    immediate_draw_reward, _ = torch.max(h_params['k_a2_draw_immediate'] * _appr_speed * _draw_falloff, dim=1)
+
     # e. [新增] 给 A1 让路：贴进 A1 碰撞半径附近要受罚（友军误伤双方都罚，撞上直接判负）
     dist_a2_to_a1_now = torch.linalg.norm(a2_pos - a1_pos, dim=-1)
     friendly_clearance_penalty = -h_params['k_a2_friendly_clearance_penalty'] * torch.clamp(
@@ -852,7 +975,9 @@ def calculate_rewards_and_dones_jit(
     # [A2效果化] 角色特有稠密塑形整体缩放：主项=出手通道清空；站位/贴人已降为辅助项。
     # 让路惩罚不参与缩放（安全约束，始终生效）
     dense_reward[:, 1] += h_params['k_a2_dense_scale'] * (
-        lane_clear_reward + screen_reward + interference_reward + repulsion_reward + body_check_reward - line_penalty
+        lane_clear_reward + screen_reward + interference_reward + repulsion_reward + body_check_reward
+        + spread_reward + support_reward + immediate_draw_reward
+        - line_penalty
     ) + friendly_clearance_penalty
     
     # 过线才有奖

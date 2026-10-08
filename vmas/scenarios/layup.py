@@ -85,10 +85,12 @@ class Scenario(BaseScenario):
         # --- 场地属性 ---
         self.h_params["W"] = kwargs.get("W", 8.0)  # 场地宽度 (x-axis)
         self.h_params["L"] = kwargs.get("L", 15.0)  # 场地长度 (y-axis)
-        self.h_params["R_spot"] = kwargs.get("R_spot", 1.2)  # 篮下可投篮的圆形区域半径
+        # [2026-10-03 用户] 投篮点半径 1.2 -> 0.9 m：读条/按键的合法区域缩小 44% 面积，
+        # 同时 gaussian_sigma / screen_pos_sigma / def_gaussian_spot_sigma 等派生量按 0.5*R 自动收紧。
+        self.h_params["R_spot"] = kwargs.get("R_spot", 0.9)  # 篮下可投篮的圆形区域半径
 
         # --- 游戏规则 ---
-        self.h_params["t_limit"] = kwargs.get("t_limit", 15.0)  # 每回合最大时长（秒）
+        self.h_params["t_limit"] = kwargs.get("t_limit", 20.0)  # 每回合最大时长（秒）[2026-10-03 用户] 15.0 -> 20.0：整局 150 步 -> 200 步，给博弈更多操作空间
         self.dt = kwargs.get("dt", 0.1)  # 物理仿真的时间步长
         self.spawn_area_depth = kwargs.get(
             "spawn_area_depth", 1.0
@@ -163,6 +165,26 @@ class Scenario(BaseScenario):
         self.h_params["foul_approach_eps"] = kwargs.get(
             "foul_approach_eps", 1e-3
         )  # 判责平手阈值：两侧接近分量差值小于该值视为平手（改用整体速度决胜）
+        # [方案A·2026-10-04] 碰撞犯规门槛：从"相对速度 |Δv|"改为"主动方的接近分量"
+        # 动机：iter450 buffer 实测，终局帧接触对里 90.6% 满足旧 |Δv|>0.5 门槛，
+        # 但其中 86% 的主动方接近分量中位仅 0.19（横滑擦身而非撞人）；而追击型接触
+        # （对方在逃、|Δv| 被抵消）反而被旧门槛漏判 —— 两个量不嵌套，门槛应与判责同源。
+        self.h_params["foul_approach_threshold"] = kwargs.get(
+            "foul_approach_threshold", 0.35
+        )  # 主动方接近分量超过该值才算严重碰撞（判犯规）
+        # [方案A+·2026-10-04] 篮球式"合法防守位"：防守方必须基本站定（速度足够低、
+        # 不迎面冲）才算合理占位；否则双方移动中的碰撞责任倾向防守方（进攻方获得豁免）。
+        # 豁免是连续的：violation = max(0, speed_D - v_legal) + max(0, approach_D - a_legal)，
+        # 进攻方责任分 = approach_A - k * violation，<= 防守方接近分量时责任归防守方。
+        self.h_params["foul_legal_def_speed"] = kwargs.get(
+            "foul_legal_def_speed", 0.4
+        )  # 防守方"站定"允许的最大移动速度 (m/s)【2026-10-06 用户定值 0.3 -> 0.4】
+        self.h_params["foul_legal_def_approach"] = kwargs.get(
+            "foul_legal_def_approach", 0.4
+        )  # 防守方迎面接近的容忍量 (m/s)，超出部分计入非法占位【0.3 -> 0.4】
+        self.h_params["k_legal_def_exempt"] = kwargs.get(
+            "k_legal_def_exempt", 1.2
+        )  # 非法占位 -> 进攻方豁免的兑换系数【1.5 -> 1.2，减轻判责偏向守方】
         self.h_params["wall_collision_frames"] = kwargs.get(
             "wall_collision_frames", 20.0
         )  # 持续撞墙导致回合结束的帧数阈值
@@ -172,6 +194,19 @@ class Scenario(BaseScenario):
         self.h_params["max_time_over_midline"] = kwargs.get(
             "max_time_over_midline", 5.0
         )  # 防守方允许越过中线的最大帧数（5 帧 ≈ 0.25s）
+
+        # --- 2.2.1 感知噪声（模拟真实感知误差）---
+        # 队友/对手的观测（相对位置、相对速度、绝对位置、绝对速度）加入高斯噪声，
+        # 噪声标准差随"观测者到被观测者的距离 d"线性增大（角度误差恒定 -> 横向误差 ∝ d），
+        # 并各有一个与距离无关的传感器底噪：
+        #   sigma_pos = perception_noise_floor + k_perception_noise * d      (米)
+        #   sigma_vel = perception_noise_vel_floor + k_perception_noise_vel * d  (米/秒)
+        # 同一份含噪观测量同时用于相对量与绝对量，保证两者一致（不会互相抵消）。
+        # 自身状态（本体感受）与 spot/basket（固定地标）不加噪声；critic 的全局状态不加噪声。
+        self.h_params["k_perception_noise"] = kwargs.get("k_perception_noise", 0.02)
+        self.h_params["perception_noise_floor"] = kwargs.get("perception_noise_floor", 0.05)
+        self.h_params["k_perception_noise_vel"] = kwargs.get("k_perception_noise_vel", 0.01)
+        self.h_params["perception_noise_vel_floor"] = kwargs.get("perception_noise_vel_floor", 0.02)
 
         # --- 2.3 胜负判定 ---
         self.h_params["win_condition_block_threshold"] = kwargs.get(
@@ -207,6 +242,14 @@ class Scenario(BaseScenario):
         self.h_params["k_a2_shot_pos_bonus"] = kwargs.get(
             "k_a2_shot_pos_bonus", 3000.0
         )  # A1投篮时，A2在防守方半场奖励
+        # [2026-10-04 用户] A1 被盖保持原样（12000 = 最终 -60，不因本次改动变化）；
+        # A2 单独加重到 18000(= 最终 -90，A2 被盖约 -17)，让掩护/卡位没做好的 A2 多担代价。
+        self.h_params["k_blocked_shot_penalty"] = kwargs.get(
+            "k_blocked_shot_penalty", 12000.0
+        )  # 投篮被盖(total_block_factor>=0.5)时，A1 扣除的固定分（维持原值）
+        self.h_params["k_blocked_shot_penalty_a2"] = kwargs.get(
+            "k_blocked_shot_penalty_a2", 18000.0
+        )  # 同一事件里 A2 单独扣除的固定分（比 A1 更重）
         self.h_params["a2_screen_sigma"] = kwargs.get(
             "a2_screen_sigma", 4 * self.h_params["agent_radius"]
         )  # A2掩护奖励高斯函数的标准差
@@ -297,6 +340,12 @@ class Scenario(BaseScenario):
         self.h_params["k_def_delay_bonus"] = kwargs.get(
             "k_def_delay_bonus", 14000.0
         )  # 对方投篮时，防守方根据拖延时间获得的奖励系数（7000→14000，配合 r^1.5 曲线，加强延误激励）
+        self.h_params["k_def_contest_discount_max"] = kwargs.get(
+            "k_def_contest_discount_max", 0.10
+        )  # 出手瞬间"几何干扰度"（贴身+挡住出手线路）对基础罚分的最大减免比例（≤10%）
+        self.h_params["k_def_delay_floor"] = kwargs.get(
+            "k_def_delay_floor", 0.50
+        )  # 延误奖励的无条件保底比例（延误永远好过不延误），其余部分按出手瞬间干扰度发放
 
         # =================================================================================
         # 4. 稠密奖励与行为塑造 (Dense Rewards & Behavior Shaping)
@@ -447,9 +496,11 @@ class Scenario(BaseScenario):
         )  # A1的近距离惩罚系数
 
         # --- 4.3 进攻方 - A2 (无球人) ---
+        # [2026-10-04 用户] 提高 ideal screen pos 奖励：30 -> 200（满值 +0.1/步）。
+        # 实测 A2 到理想掩护位平均 1.95m、位置门只 27% 开着，30 raw 的梯度太弱。
         self.h_params["k_ideal_screen_pos"] = kwargs.get(
-            "k_ideal_screen_pos", 30.0
-        )  # A2移动到最佳掩护位置的奖励系数（300 -> 30：站位匹配=教人站位，降为辅助项）
+            "k_ideal_screen_pos", 200.0
+        )  # A2移动到最佳掩护位置的奖励系数（300 -> 30 -> 200：重新加强站位信号）
         self.h_params["k_a2_interference_reward"] = kwargs.get(
             "k_a2_interference_reward", 40.0
         )  # A2靠近并干扰防守者的奖励系数（400 -> 40：纯贴人，降为辅助项）
@@ -504,6 +555,38 @@ class Scenario(BaseScenario):
         )  # [A2效果化] A2角色特有稠密塑形(通道清空/掩护/干扰/排斥/挡线)的整体缩放系数，1.0=原样
         # 注意：只缩放A2角色特有项；通用物理惩罚(出界/动作/碰撞/推挤)与过中线门控不变
 
+        # --- 4.3.1 [2026-10-04 用户] A2 行为改造：拉开空间 / 走廊支援 / 即时造撞 / 硬门控 ---
+        self.h_params["k_a2_spread_reward"] = kwargs.get(
+            "k_a2_spread_reward", 200.0
+        )  # A1 过线后，盯防 A1 的防守者（离 A1 最近）"远离 A1"的速度奖励（A2 拿钱=把防守从 A1 身上拉开）
+        self.h_params["k_a2_spread_penalty"] = kwargs.get(
+            "k_a2_spread_penalty", 60.0
+        )  # 同上，但防守者朝 A1 逼近时 A2 的少量负奖励系数（负向有钳制，见 a2_spread_neg_cap）
+        self.h_params["a2_spread_neg_cap"] = kwargs.get(
+            "a2_spread_neg_cap", 1.0
+        )  # 拉开空间项负向速度的计入上限(m/s)，"钳制住不要负太多"
+        self.h_params["k_a2_support_reward"] = kwargs.get(
+            "k_a2_support_reward", 150.0
+        )  # A1 过线后，A2 待在 A1->投篮点进攻走廊附近、且出手通道已清空时的即时支援奖励
+        self.h_params["a2_support_lane_sigma"] = kwargs.get(
+            "a2_support_lane_sigma", 1.0
+        )  # 走廊支援奖励：A2 到 A1->投篮点走廊的垂距衰减 σ(米)
+        self.h_params["a2_support_clear_sigma"] = kwargs.get(
+            "a2_support_clear_sigma", 0.35
+        )  # 走廊支援奖励：出手通道清空门 exp(-(总封盖因子)^2/2σ^2) 的 σ
+        self.h_params["k_a2_draw_immediate"] = kwargs.get(
+            "k_a2_draw_immediate", 300.0
+        )  # [造撞渠道重构] 防守者朝 A2 冲来的速度×距离衰减，直接即时发放（不再要求 A2 近静止）
+        self.h_params["a2_draw_speed_cap"] = kwargs.get(
+            "a2_draw_speed_cap", 3.0
+        )  # 即时造撞奖励：防守者接近速度的计入上限(m/s)
+        self.h_params["a2_between_gate_sigma"] = kwargs.get(
+            "a2_between_gate_sigma", self.h_params["agent_radius"] * 1.5
+        )  # [硬门控] 干扰/卡位奖励要求 A2 挡在"防守者->A1"连线上：垂距衰减 σ(米)
+        self.h_params["a2_between_gate_k"] = kwargs.get(
+            "a2_between_gate_k", 7.0
+        )  # [硬门控] 干扰/卡位奖励要求 A2 在防守者前方(proj 落在线段内)：sigmoid 斜率
+
         # --- 4.4 防守方 ---
         self.h_params["k_positioning"] = kwargs.get(
             "k_positioning", 140.0
@@ -553,8 +636,11 @@ class Scenario(BaseScenario):
             "time_penalty_grace_period", 8
         )  # 回合开始后，免除时间惩罚的宽限期（秒）
         self.h_params["k_attacker_time_penalty"] = kwargs.get(
-            "k_attacker_time_penalty", 2.0
-        )  # 宽限期后，若A1未进入投篮区，进攻方将受到时间惩罚（[A方案] 0.5 -> 2.0）
+            "k_attacker_time_penalty", 1.5
+        )  # 宽限期后，若A1未进入投篮区，进攻方将受到时间惩罚
+        # [2026-10-03] 2.0 -> 0.7 -> 1.5：用户要求恢复紧迫感（画面"散步"）。
+        # 0.7 是配合 t_limit 15->20 的稀释；1.5 时"故意拖满"整段累计约
+        # 1.5*5760*0.0005 ≈ 4.3 分，仍远在终局奖励（±50）之下，不至于主导经济。
         self.h_params["k_defender_time_bonus"] = kwargs.get(
             "k_defender_time_bonus", 0.5
         )  # 宽限期后，防守方将获得持续的时间奖励
@@ -613,7 +699,8 @@ class Scenario(BaseScenario):
                 collide=True,
                 movable=True,
                 rotatable=False,
-                u_range=self.h_params["v_max"],  # if is_attacker else 1.0,
+                # [投篮按键] 3 通道同范围（第 3 通道是 A1 的离散键，只能取 0/1）
+                u_range=[self.h_params["v_max"]] * 3,
                 drag=0.01,
                 shape=Sphere(radius=self.h_params["agent_radius"]),
                 dynamics=Holonomic(),
@@ -623,7 +710,8 @@ class Scenario(BaseScenario):
                 else Color.BLUE
                 if not is_attacker
                 else Color.PINK,
-                # action_size=3
+                # [投篮按键] 第 3 通道 = A1 的离散投篮键 (0/1)，其余 agent 忽略
+                action_size=3,
             )
             agent.is_attacker = is_attacker
             agent.controller = VelocityController(
@@ -696,6 +784,8 @@ class Scenario(BaseScenario):
         self.a1_normalized_speed_k = torch.zeros(batch_dim, device=device)
         self.is_in_spot_a1 = torch.zeros(batch_dim, device=device)
         self.a1_block_factor = torch.zeros(batch_dim, device=device)
+        # [投篮按键] 本帧 A1 是否有效按下投篮键（在圈内且按键=1）
+        self.a1_press = torch.zeros(batch_dim, device=device, dtype=torch.bool)
 
         # self.jitted_reward_calculator = torch.compile(calculate_rewards_and_dones_jit)
         self.jitted_reward_calculator = calculate_rewards_and_dones_jit
@@ -703,7 +793,49 @@ class Scenario(BaseScenario):
 
         self.reward_hist = {}
 
+        # [感知噪声] 每步为所有 (观测者, 被观测者) 组合一次性采样，post_step/reset 里刷新，
+        # observation() 只做切片 —— 避免每个 agent 各自做十几次小张量算子（实测可省 ~2/3 开销）。
+        self._noise_enabled = (
+            self.h_params["perception_noise_floor"] > 0
+            or self.h_params["k_perception_noise"] > 0
+            or self.h_params["perception_noise_vel_floor"] > 0
+            or self.h_params["k_perception_noise_vel"] > 0
+        )
+        _n_agents = len(world.agents)
+        _tgts = []
+        for _a in range(_n_agents):
+            if _a < self.n_attackers:
+                _tm, _opps = 1 - _a, (self.n_attackers, self.n_attackers + 1)
+            else:
+                _tm = 1 - (_a - self.n_attackers) + self.n_attackers
+                _opps = (0, 1)
+            _tgts.append([_tm, *_opps])
+        self.perception_targets = torch.tensor(_tgts, dtype=torch.long, device=device)
+        self.perceived_pos = torch.zeros(_n_agents, 3, 2, device=device).expand(batch_dim, -1, -1, -1).clone()
+        self.perceived_vel = torch.zeros_like(self.perceived_pos)
+
         return world
+
+    def _refresh_perception(self):
+        """[感知噪声] 刷新"含噪观测"缓存：对每个观测者 a，按 (队友, 对手1, 对手2) 顺序
+        记录它看到的目标位置/速度。位置误差标准差 = 底噪 + k * 距离（角度误差恒定）。
+        同一份含噪量同时供相对量与绝对量使用（两者一致，无法互相抵消还原真值）。"""
+        pos_all = torch.stack([ag.state.pos for ag in self.world.agents], dim=1)   # (B, A, 2)
+        vel_all = self.p_vels                                                     # (B, A, 2)
+        sel = self.perception_targets                                             # (A, 3)
+        seen_pos = pos_all[:, sel]                                                # (B, A, 3, 2)
+        seen_vel = vel_all[:, sel]
+        if self._noise_enabled:
+            dist = torch.linalg.norm(seen_pos - pos_all.unsqueeze(2), dim=-1, keepdim=True)
+            sigma_pos = self.h_params["perception_noise_floor"] + self.h_params["k_perception_noise"] * dist
+            sigma_vel = (
+                self.h_params["perception_noise_vel_floor"]
+                + self.h_params["k_perception_noise_vel"] * dist
+            )
+            seen_pos = seen_pos + torch.randn_like(seen_pos) * sigma_pos
+            seen_vel = seen_vel + torch.randn_like(seen_vel) * sigma_vel
+        self.perceived_pos = seen_pos
+        self.perceived_vel = seen_vel
 
     # @timer
     # @torch.compile
@@ -741,6 +873,7 @@ class Scenario(BaseScenario):
         self.dones[batch_range] = False
         self.p_raw_actions[batch_range].zero_()
         self.termination_reason_code[batch_range] = 0
+        self.a1_press[batch_range] = False
 
         # --- 3. 篮筐位置 (向量化赋值) ---
         basket_pos = torch.zeros((batch_dim, 2), device=device)
@@ -873,15 +1006,29 @@ class Scenario(BaseScenario):
             "k_a1_speed_spot_reward"
         ] / (initial_dist + 1e-6)
 
+        # [感知噪声] reset 后立即刷新一次含噪观测缓存（首帧观测也要带噪声）
+        self._refresh_perception()
+
     # @timer
     # @torch.compile
     def process_action(self, agent: Agent):
         agent_idx = self.world.agents.index(agent)
 
-        # 1. 分离速度和刹车信号 (刹车信号范围现在是 [-5, 5])
+        # 1. 分离速度指令 (u[:, :2]) 与投篮按键 (u[:, 2], 仅 A1 使用)
+        #    [线性映射] 去掉 (mag/v_max)^0.5 的 1.5 次方整形，保留小命令的精细控制
         target_vel = agent.action.u[:, :2]
-        mag = torch.norm(target_vel, p=2, dim=1, keepdim=True)
-        final_target_vel = target_vel * torch.pow(mag / self.h_params["v_max"], 1.5 - 1)
+        final_target_vel = target_vel
+
+        # [投篮按键] A1 按下且人在投篮圈内 -> 本帧强制刹车（目标速度清零）
+        if agent == self.a1:
+            press = agent.action.u[:, 2] > 0.5
+            press_valid = press & (self.is_in_spot_a1 > 0.5)
+            self.a1_press.copy_(press_valid)
+            final_target_vel = torch.where(
+                press_valid.unsqueeze(-1),
+                torch.zeros_like(final_target_vel),
+                final_target_vel,
+            )
 
         brake_signal = torch.zeros_like(agent.action.u[:, 0])
 
@@ -903,12 +1050,13 @@ class Scenario(BaseScenario):
             is_delayed = self.delay_counter > 0
             final_target_vel[is_delayed] = 0.0
 
-        # 5. 实现动作死区
-        action_norm = torch.linalg.vector_norm(final_target_vel, dim=1)
-        final_target_vel[action_norm < 0.2] = 0.0
+        # 5. [已删除] 动作死区 final_target_vel[norm < 0.2] = 0.0
+        #    改为线性映射后保留小命令的精细控制（读条静止由投篮键刹车保证）
 
         # 6. 后续所有操作都基于我们最终计算出的 final_target_vel
-        clamped_vel = TorchUtils.clamp_with_norm(final_target_vel, agent.u_range)
+        clamped_vel = TorchUtils.clamp_with_norm(
+            final_target_vel, self.h_params["v_max"]
+        )
 
         requested_a = (clamped_vel - agent.state.vel) / self.world.dt
         self.requested_accelerations[:, agent_idx, :] = requested_a
@@ -916,7 +1064,29 @@ class Scenario(BaseScenario):
 
         agent.action.u = agent.state.vel + achievable_a * self.world.dt
 
+        # [投篮按键] 按下帧把"期望速度"置 0，由 PID 保持速度为 0
+        #（不直接操作 state：制动力交给 controller.process_force 计算）
+        if agent == self.a1:
+            press_b = self.a1_press
+            if torch.any(press_b):
+                agent.action.u[press_b] = 0.0
+
         agent.controller.process_force()
+
+    def get_action_mask(self) -> torch.Tensor:
+        """
+        [投篮按键] 返回组级动作 mask: [batch, n_agents, 2]，True = 允许该选项。
+        只有 A1 的"按下"选项受"人在投篮圈内"门控；其余 agent 的离散位恒为"不按"。
+        """
+        batch_dim = self.world.batch_dim
+        mask = torch.zeros(
+            (batch_dim, len(self.world.agents), 2),
+            device=self.world.device,
+            dtype=torch.bool,
+        )
+        mask[:, :, 0] = True  # "不按" 始终允许
+        mask[:, 0, 1] = self.is_in_spot_a1 > 0.5  # A1 在圈内才允许按
+        return mask
 
     # @timer
     def pre_step(self):
@@ -991,6 +1161,7 @@ class Scenario(BaseScenario):
             self.vel_diffs_norm,
             self.requested_accelerations,
             self.a1_normalized_speed_k,
+            self.a1_press,  # [投篮按键] 本帧 A1 是否有效按下（推进读条的条件之一）
         )
 
         # 5. 根据JIT函数的输出更新场景状态
@@ -1051,6 +1222,9 @@ class Scenario(BaseScenario):
                 torch.abs(pos[:, 1]) > (0.999 * self.h_params["L"] / 2)
             )
             agent.state.vel[is_hard_oob] = 0.0
+
+        # [感知噪声] 物理步结束后刷新含噪观测缓存（observation() 只做切片）
+        self._refresh_perception()
 
     def info(self, agent: Agent):
         # 获取当前智能体的索引
@@ -1191,19 +1365,25 @@ class Scenario(BaseScenario):
         opp1 = self.world.agents[opp1_idx]
         opp2 = self.world.agents[opp2_idx]
 
-        teammate_rel_pos = teammate.state.pos - self_pos
-        teammate_rel_vel = self.p_vels[:, teammate_idx] - self_vel
-        opp1_rel_pos = opp1.state.pos - self_pos
-        opp1_rel_vel = self.p_vels[:, opp1_idx] - self_vel
-        opp2_rel_pos = opp2.state.pos - self_pos
-        opp2_rel_vel = self.p_vels[:, opp2_idx] - self_vel
+        # ---- [感知噪声] 取本步已采样好的"含噪观测"（在 post_step/reset 里统一刷新）----
+        seen = self.perceived_pos[:, agent_idx]      # (B, 3, 2) 顺序 = (队友, 对手1, 对手2)
+        seen_vel_t = self.perceived_vel[:, agent_idx]
+        teammate_seen_pos, opp1_seen_pos, opp2_seen_pos = seen.unbind(dim=1)
+        teammate_seen_vel, opp1_seen_vel, opp2_seen_vel = seen_vel_t.unbind(dim=1)
 
-        teammate_abs_pos = teammate.state.pos
-        teammate_abs_vel = self.p_vels[:, teammate_idx]
-        opp1_abs_pos = opp1.state.pos
-        opp1_abs_vel = self.p_vels[:, opp1_idx]
-        opp2_abs_pos = opp2.state.pos
-        opp2_abs_vel = self.p_vels[:, opp2_idx]
+        teammate_rel_pos = teammate_seen_pos - self_pos
+        teammate_rel_vel = teammate_seen_vel - self_vel
+        opp1_rel_pos = opp1_seen_pos - self_pos
+        opp1_rel_vel = opp1_seen_vel - self_vel
+        opp2_rel_pos = opp2_seen_pos - self_pos
+        opp2_rel_vel = opp2_seen_vel - self_vel
+
+        teammate_abs_pos = teammate_seen_pos
+        teammate_abs_vel = teammate_seen_vel
+        opp1_abs_pos = opp1_seen_pos
+        opp1_abs_vel = opp1_seen_vel
+        opp2_abs_pos = opp2_seen_pos
+        opp2_abs_vel = opp2_seen_vel
 
         spot_rel_pos = self.spot_center.state.pos - self_pos
         spot_abs_pos = self.spot_center.state.pos
