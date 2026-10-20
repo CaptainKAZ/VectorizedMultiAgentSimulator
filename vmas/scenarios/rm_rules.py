@@ -144,6 +144,7 @@ class RmState:
     double_foul: Tensor = field(init=False)
     both_200: Tensor = field(init=False)
     done: Tensor = field(init=False)
+    just_died: Tensor = field(init=False)
     step_count: int = 0                    # env steps since env creation (curriculum clock)
 
     obs: Tensor = field(init=False)
@@ -207,6 +208,7 @@ class RmState:
         self.double_foul = b(B)
         self.both_200 = b(B)
         self.done = b(B)
+        self.just_died = b(B, N)
         self.obs = f(B, N, OBS_DIM)
         self.action_mask = b(B, N, 4)
         self.global_state = f(B, GLOBAL_DIM)
@@ -292,6 +294,7 @@ def _fixed_reset_rows(s: RmState, rows: List[int]) -> None:
         s.double_foul[b] = False
         s.both_200[b] = False
         s.done[b] = False
+        s.just_died[b].zero_()
 
 
 def _build_spawn_pool(s: RmState, team: int, step: float = 0.2) -> Tensor:
@@ -441,6 +444,7 @@ def _random_reset_rows(s: RmState, rows: List[int], mode: str, seed: int = 0) ->
     s.double_foul[idx] = False
     s.both_200[idx] = False
     s.done[idx] = False
+    s.just_died[idx] = False
 
 
 def _fixed_prob(s: RmState) -> float:
@@ -828,6 +832,7 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     s.last_hit_damage.zero_()
     s.last_damage.zero_()
     s.last_p_final.zero_()
+    s.just_died.zero_()
     s.foul_loser.fill_(-1)
     s.double_foul.zero_()
     s.both_200.zero_()
@@ -1024,6 +1029,7 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     s.score = s.score + kill_add
 
     # death state
+    s.just_died = just_died
     if died.any():
         s.alive = s.alive & (~died)
         s.hp = torch.where(died, torch.zeros_like(s.hp), s.hp)
@@ -1225,7 +1231,21 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
     terminal = torch.where(done.unsqueeze(1) & s.both_200.unsqueeze(1), torch.full_like(terminal, cfg.terminal_both_200), terminal)
     terminal = torch.where(done.unsqueeze(1) & s.double_foul.unsqueeze(1), torch.full_like(terminal, cfg.terminal_both_foul), terminal)
 
-    s.reward_dense = dense + hit
+    reward_dense = dense + hit
+    just_died = s.just_died.bool()
+    dead = ~s.alive
+    # death frame: instant penalty; subsequent dead frames: zero dense reward
+    reward_dense = torch.where(
+        just_died,
+        torch.full_like(reward_dense, -cfg.k_death_penalty),
+        reward_dense,
+    )
+    reward_dense = torch.where(
+        dead & (~just_died),
+        torch.zeros_like(reward_dense),
+        reward_dense,
+    )
+    s.reward_dense = reward_dense
     s.reward_terminal = terminal
     s.reward = s.reward_dense + s.reward_terminal
 

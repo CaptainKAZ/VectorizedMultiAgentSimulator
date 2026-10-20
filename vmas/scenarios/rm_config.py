@@ -81,7 +81,7 @@ class RmConfig:
     # ------------------------------------------------------------------
     # 死亡 / 复活 / 回血
     # ------------------------------------------------------------------
-    respawn_time: float = 7.5
+    respawn_time: float = 5.0
     invuln_time: float = 5.0
     hp_revive: float = 65.0
     heal_per_frame: float = 8.125               # 81.25/s
@@ -145,10 +145,11 @@ class RmConfig:
     terminal_both_200: float = 2.0
     terminal_both_foul: float = -10.0
     k_hit_reward: float = 0.02            # full 325 damage -> 0.02
-    k_center_reward: float = 0.0005        # approach-center shaping, per frame
+    k_center_reward: float = 0.0015        # approach-center shaping, per frame
     center_sigma: float = 1.5
     # survival / low-HP return-home shaping (v1.9)
     k_survival_reward: float = 0.0002      # per alive agent per frame
+    k_death_penalty: float = 0.5           # instant dense penalty on the death frame
     k_low_hp_home_reward: float = 0.0005   # per low-HP alive agent per frame, Gaussian near own spawn
     low_hp_threshold: float = 0.5          # fraction of hp_max
     home_sigma: float = 2.0                # Gaussian sigma around own spawn center, metres
