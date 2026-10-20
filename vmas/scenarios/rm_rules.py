@@ -1216,7 +1216,29 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
         * low
         * alive_f
     )
-    dense = dense + center_r + survival + home
+    # v1.12 collision/contact penalty: robot-robot, robot-corpse, wall, cover.
+    # The resolver pushes bodies apart; use a small tolerance so the contact
+    # frame is still penalized.
+    contact = torch.zeros((B, N), device=dev, dtype=torch.float32)
+    for i in range(N):
+        d_other = torch.linalg.vector_norm(
+            s.pos[:, i].unsqueeze(1) - s.pos, dim=-1
+        )
+        near_robot = d_other <= 2.0 * cfg.robot_radius + 1e-3
+        near_robot[:, i] = False
+        robot_hits = near_robot.sum(dim=1).float()
+        wall = (
+            (s.pos[:, i, 0].abs() >= cfg.bound_x - cfg.robot_radius - 1e-3)
+            | (s.pos[:, i, 1].abs() >= cfg.bound_y - cfg.robot_radius - 1e-3)
+        ).float()
+        cover_hits = torch.zeros((B,), device=dev)
+        for poly in s.covers:
+            _, dist, _, inside = G.nearest_point_on_polygon(s.pos[:, i], poly)
+            near = (dist <= cfg.robot_radius + 1e-3) | inside
+            cover_hits = torch.maximum(cover_hits, near.float())
+        contact[:, i] = robot_hits + wall + cover_hits
+
+    dense = dense + center_r + survival + home - cfg.k_collision_penalty * contact
 
     terminal = torch.zeros((B, N), device=dev)
     done = s.done

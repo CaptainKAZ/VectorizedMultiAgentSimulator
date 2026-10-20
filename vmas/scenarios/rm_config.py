@@ -82,7 +82,7 @@ class RmConfig:
     # 死亡 / 复活 / 回血
     # ------------------------------------------------------------------
     respawn_time: float = 5.0
-    invuln_time: float = 5.0
+    invuln_time: float = 3.0
     hp_revive: float = 65.0
     heal_per_frame: float = 8.125               # 81.25/s
     spawn_damage_per_frame: float = 8.125       # enemy spawn damage
@@ -150,6 +150,7 @@ class RmConfig:
     # survival / low-HP return-home shaping (v1.9)
     k_survival_reward: float = 0.0002      # per alive agent per frame
     k_death_penalty: float = 0.5           # instant dense penalty on the death frame
+    k_collision_penalty: float = 0.001     # per contact per frame (robot/corpse/wall/cover)
     k_low_hp_home_reward: float = 0.0005   # per low-HP alive agent per frame, Gaussian near own spawn
     low_hp_threshold: float = 0.5          # fraction of hp_max
     home_sigma: float = 2.0                # Gaussian sigma around own spawn center, metres
