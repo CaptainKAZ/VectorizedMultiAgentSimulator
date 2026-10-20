@@ -144,6 +144,7 @@ class RmState:
     double_foul: Tensor = field(init=False)
     both_200: Tensor = field(init=False)
     done: Tensor = field(init=False)
+    step_count: int = 0                    # env steps since env creation (curriculum clock)
 
     obs: Tensor = field(init=False)
     action_mask: Tensor = field(init=False)
@@ -442,6 +443,18 @@ def _random_reset_rows(s: RmState, rows: List[int], mode: str, seed: int = 0) ->
     s.done[idx] = False
 
 
+def _fixed_prob(s: RmState) -> float:
+    """Probability of official fixed start at the current curriculum clock."""
+    cfg = s.cfg
+    if cfg.curriculum_steps <= 0:
+        return float(cfg.fixed_prob_end)
+    t = min(1.0, max(0.0, s.step_count / float(cfg.curriculum_steps)))
+    return float(
+        cfg.fixed_prob_start
+        + (cfg.fixed_prob_end - cfg.fixed_prob_start) * t
+    )
+
+
 def reset_state(
     s: RmState,
     idx=None,
@@ -454,6 +467,26 @@ def reset_state(
     mode = mode or s.cfg.init_mode
     if mode == "fixed":
         _fixed_reset_rows(s, rows)
+    elif mode == "curriculum":
+        # Per-reset choice: official fixed start vs RSI random start.
+        # The fixed probability rises linearly from fixed_prob_start to
+        # fixed_prob_end over cfg.curriculum_steps env steps.
+        gen = torch.Generator(device=s.device)
+        gen.manual_seed(int(seed) & 0x7FFFFFFF)
+        p = _fixed_prob(s)
+        pick = torch.rand(len(rows), generator=gen, device=s.device) < p
+        flags = pick.reshape(-1).tolist()
+        fixed_rows = [r for r, f in zip(rows, flags) if f]
+        random_rows = [r for r, f in zip(rows, flags) if not f]
+        if fixed_rows:
+            _fixed_reset_rows(s, fixed_rows)
+        if random_rows:
+            _random_reset_rows(
+                s,
+                random_rows,
+                "mixed",
+                seed=seed + (random_rows[0] if random_rows else 0),
+            )
     else:
         _random_reset_rows(s, rows, mode, seed=seed + (rows[0] if rows else 0))
     build_observation(s)
@@ -782,6 +815,7 @@ def _finish(s: RmState, score_before: Tensor, snap, foul_mask, gen) -> None:
 
 def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     cfg = s.cfg
+    s.step_count += 1
     B, N = s.B, cfg.n_agents
     dev = s.device
     gen = generator

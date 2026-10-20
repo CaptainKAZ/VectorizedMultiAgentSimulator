@@ -151,8 +151,13 @@ class RmConfig:
     # ------------------------------------------------------------------
     # 训练课程（不是比赛规则）
     # ------------------------------------------------------------------
-    init_mode: str = "fixed"              # fixed | symmetric | asymmetric | mixed
+    init_mode: str = "fixed"              # fixed | symmetric | asymmetric | mixed | curriculum
     rsi_symmetric_prob: float = 0.5       # mixed: 50% symmetric, 50% asymmetric
+    # curriculum: per-reset probability of official fixed start rises from
+    # fixed_prob_start to fixed_prob_end over curriculum_steps env steps.
+    fixed_prob_start: float = 0.0
+    fixed_prob_end: float = 1.0
+    curriculum_steps: int = 50_000_000
     rsi_min_sep: float = 1.0              # min center distance between robots
     rsi_time_min: float = 30.0
     rsi_time_max: float = 180.0
