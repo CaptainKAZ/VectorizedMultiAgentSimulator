@@ -60,14 +60,13 @@ OUTCOME_NAMES = {
 SELF_DIM = 24
 MATE_DIM = 15
 ENEMY_DIM = 14
-CORPSE_DIM = 3
 CUE_DIM = 3
 LIDAR_DIM = 128
 HUD_DIM = 10
-OBS_DIM = SELF_DIM + 2 * MATE_DIM + 3 * ENEMY_DIM + 3 * CORPSE_DIM + CUE_DIM + LIDAR_DIM + HUD_DIM
+OBS_DIM = SELF_DIM + 2 * MATE_DIM + 3 * ENEMY_DIM + CUE_DIM + LIDAR_DIM + HUD_DIM
 
 # global state layout (critic)
-G_AGENT_DIM = 21
+G_AGENT_DIM = 22
 G_GLOBAL_DIM = 11
 GLOBAL_DIM = 6 * G_AGENT_DIM + G_GLOBAL_DIM
 
@@ -154,6 +153,7 @@ class RmState:
     reward_terminal: Tensor = field(init=False)
     last_hit_damage: Tensor = field(init=False)
     last_damage: Tensor = field(init=False)
+    shots: Tensor = field(init=False)          # cumulative fired shots per agent
 
     # static maps
     team: Tensor = field(init=False)
@@ -214,6 +214,7 @@ class RmState:
         self.reward_terminal = f(B, N)
         self.last_hit_damage = f(B, N)
         self.last_damage = f(B, N, N)
+        self.shots = f(B, N)
 
         self.team = torch.tensor(
             [cfg.team(i) for i in range(N)], device=d, dtype=torch.long
@@ -282,6 +283,7 @@ def _fixed_reset_rows(s: RmState, rows: List[int]) -> None:
         s.time[b] = cfg.episode_time
         s.total_damage[b].zero_()
         s.cum_damage[b].zero_()
+        s.shots[b].zero_()
         s.occ[b].zero_()
         s.outcome[b] = OUTCOME_ONGOING
         s.winner[b] = -1
@@ -430,6 +432,7 @@ def _random_reset_rows(s: RmState, rows: List[int], mode: str, seed: int = 0) ->
     s.time[idx] = t
     s.total_damage[idx] = 0.0
     s.cum_damage[idx] = 0.0
+    s.shots[idx] = 0.0
     s.occ[idx] = 0.0
     s.outcome[idx] = OUTCOME_ONGOING
     s.winner[idx] = -1
@@ -938,6 +941,8 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     s.hp = torch.where(spawn_dmg, torch.clamp(s.hp - cfg.spawn_damage_per_frame, min=0.0), s.hp)
     s.last_hit_damage = damage.sum(dim=2)
     s.last_damage = damage.clone()
+    # count fired shots before the death branch clears last_fired
+    s.shots = s.shots + s.last_fired.float()
 
     # hit direction cue: strongest attacker of this frame, +/-45 deg, 1 frame
     total_dmg = damage.sum(dim=1)
@@ -1232,16 +1237,23 @@ def build_observation(s: RmState, generator: Optional[torch.Generator] = None) -
         o += [torch.linalg.vector_norm(s.pos[:, i], dim=-1) / cfg.lock_range]
         # teammates (2 * 15)
         for j in s.mate_idx[i].tolist():
+            alive_j = s.alive[:, j]
             rel = sign[:, i, 0].unsqueeze(-1) * (s.pos[:, j] - s.pos[:, i])
             rvel = sign[:, i, 0].unsqueeze(-1) * (s.vel[:, j] - s.vel[:, i])
             dyaw = G.wrap_angle(s.yaw[:, j] - s.yaw[:, i])
-            o += [rel[:, 0] / cfg.lock_range, rel[:, 1] / cfg.lock_range]
-            o += [rvel[:, 0] / (2 * cfg.v_max), rvel[:, 1] / (2 * cfg.v_max)]
-            o += [s.hp[:, j] / cfg.hp_max, s.alive[:, j].float(), s.invuln[:, j].float()]
-            o += [torch.sin(dyaw), torch.cos(dyaw)]
-            o += [s.heat[:, j] / cfg.heat_max, s.spin[:, j]]
+            o += [torch.where(alive_j, rel[:, 0], torch.zeros_like(rel[:, 0])) / cfg.lock_range,
+                  torch.where(alive_j, rel[:, 1], torch.zeros_like(rel[:, 1])) / cfg.lock_range]
+            o += [torch.where(alive_j, rvel[:, 0], torch.zeros_like(rvel[:, 0])) / (2 * cfg.v_max),
+                  torch.where(alive_j, rvel[:, 1], torch.zeros_like(rvel[:, 1])) / (2 * cfg.v_max)]
+            o += [torch.where(alive_j, s.hp[:, j], torch.zeros_like(s.hp[:, j])) / cfg.hp_max,
+                  alive_j.float(),
+                  torch.where(alive_j, s.invuln[:, j].float(), torch.zeros_like(s.hp[:, j]))]
+            o += [torch.where(alive_j, torch.sin(dyaw), torch.zeros_like(dyaw)),
+                  torch.where(alive_j, torch.cos(dyaw), torch.zeros_like(dyaw))]
+            o += [torch.where(alive_j, s.heat[:, j], torch.zeros_like(s.heat[:, j])) / cfg.heat_max,
+                  torch.where(alive_j, s.spin[:, j], torch.zeros_like(s.spin[:, j]))]
             for k in range(4):
-                o += [(s.target[:, j] == k).float()]
+                o += [(alive_j & (s.target[:, j] == k)).float()]
         # enemies (3 * 14)
         for k in range(3):
             j = int(s.enemy_idx[i, k])
@@ -1272,14 +1284,6 @@ def build_observation(s: RmState, generator: Optional[torch.Generator] = None) -
             o += [torch.where(vis, s.alive[:, j].float(), torch.zeros_like(s.hp[:, j]))]
             o += [((s.target[:, i] == k + 1) & vis).float()]
             mask[:, i, k + 1] = vis & (~s.invuln[:, j])
-        # enemy corpses (3 * 3)
-        for k in range(3):
-            j = int(s.enemy_idx[i, k])
-            vis_c = visible_geom[:, i, k] & (~s.alive[:, j])
-            rel = sign[:, i, 0].unsqueeze(-1) * (s.pos[:, j] - s.pos[:, i])
-            o += [vis_c.float(),
-                  torch.where(vis_c, rel[:, 0], torch.zeros_like(rel[:, 0])) / cfg.lock_range,
-                  torch.where(vis_c, rel[:, 1], torch.zeros_like(rel[:, 1])) / cfg.lock_range]
         # hit cue (3)
         cue_off = 0.0 if int(s.team[i]) == 0 else PI
         cue = G.wrap_angle(s.hit_cue[:, i] + cue_off)
@@ -1341,6 +1345,11 @@ def _build_global_state(s: RmState) -> Tensor:
         for k in range(3):
             j = int(s.enemy_idx[i, k])
             parts.append(s.cum_damage[:, i, j] / cfg.hp_max)
+        # actual hit rate: realized expected damage / (shots * max damage)
+        hit_rate = s.cum_damage[:, i, :].sum(dim=-1) / (
+            s.shots[:, i] * cfg.damage_per_frame
+        ).clamp_min(1e-6)
+        parts.append(hit_rate)
     total_hp = torch.stack(
         (torch.where(s.alive & (s.team == 0).unsqueeze(0), s.hp, torch.zeros_like(s.hp)).sum(dim=1),
          torch.where(s.alive & (s.team == 1).unsqueeze(0), s.hp, torch.zeros_like(s.hp)).sum(dim=1)),
