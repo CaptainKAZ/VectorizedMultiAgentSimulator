@@ -861,9 +861,14 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
 
     new_target = torch.zeros_like(s.target)
     for k in range(1, 4):
-        valid = (s.target_cmd == k) & visible_pre[:, :, k - 1]
+        # v1.13: invulnerable enemies may be selected and pre-aimed; dead ones not.
+        alive_k = s.alive[:, s.enemy_idx[:, k - 1]]
+        valid = (
+            (s.target_cmd == k)
+            & visible_pre[:, :, k - 1]
+            & alive_k
+        )
         new_target = torch.where(valid, torch.full_like(new_target, k), new_target)
-    # dead / invuln / non-visible are already excluded by visible_pre
     lost = (new_target == 0) | (new_target != prev_target)
     s.p_t = torch.where(lost, torch.zeros_like(s.p_t), s.p_t)
     s.target = new_target
@@ -899,7 +904,13 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     for i in range(N):
         alive_i = torch.zeros((B,), device=dev, dtype=torch.bool)
         for k in range(3):
-            alive_i = alive_i | ((s.target[:, i] == k + 1) & visible_post[:, i, k])
+            j = int(s.enemy_idx[i, k])
+            # v1.13: invuln keeps the lock (pre-aim), death drops it.
+            alive_i = alive_i | (
+                (s.target[:, i] == k + 1)
+                & visible_post[:, i, k]
+                & s.alive[:, j]
+            )
         lock_alive[:, i] = alive_i
     s.target = torch.where(lock_alive, s.target, torch.zeros_like(s.target))
     s.p_t = torch.where(lock_alive, s.p_t, torch.zeros_like(s.p_t))
@@ -1388,7 +1399,8 @@ def build_observation(s: RmState, generator: Optional[torch.Generator] = None) -
             o += [torch.where(vis, alive_j.float(), torch.zeros_like(s.hp[:, j]))]
             o += [((s.target[:, i] == k + 1) & vis & alive_j).float()]
             o += [torch.where(vis, s.respawn_timer[:, j], torch.zeros_like(s.respawn_timer[:, j])) / cfg.respawn_time]
-            mask[:, i, k + 1] = vis & alive_j & (~s.invuln[:, j])
+            # v1.13: invuln enemies are targetable for pre-aim; fire still blocked
+            mask[:, i, k + 1] = vis & alive_j
         # hit cue (3)
         cue_off = 0.0 if int(s.team[i]) == 0 else PI
         cue = G.wrap_angle(s.hit_cue[:, i] + cue_off)
