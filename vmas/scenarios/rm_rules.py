@@ -1046,8 +1046,8 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
         s.target = torch.where(revive, torch.zeros_like(s.target), s.target)
         s.hit_cue_valid = s.hit_cue_valid & (~revive)
         s.vel = torch.where(revive.unsqueeze(-1), torch.zeros_like(s.vel), s.vel)
-        yaw_rand = (torch.rand((B, N), device=dev, generator=gen) * TWO_PI - PI)
-        s.yaw = torch.where(revive, yaw_rand, s.yaw)
+        # v1.3: inherit the gimbal yaw from the death frame.  A dead agent's yaw
+        # is frozen by the turret update above, so s.yaw already holds it.
         s.invuln = s.invuln | revive
         s.invuln_timer = torch.where(revive, torch.full_like(s.invuln_timer, cfg.invuln_time), s.invuln_timer)
         s.respawn_timer = torch.where(revive, torch.zeros_like(s.respawn_timer), s.respawn_timer)
