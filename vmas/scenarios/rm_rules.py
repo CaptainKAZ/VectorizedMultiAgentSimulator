@@ -41,8 +41,8 @@ OUTCOME_DRAW_FOUL = 22
 
 OUTCOME_NAMES = {
     0: "进行中",
-    1: "红方先到200",
-    2: "蓝方先到200",
+    1: "红方先到目标分",
+    2: "蓝方先到目标分",
     3: "红方时间胜",
     4: "蓝方时间胜",
     5: "红方伤害tiebreak",
@@ -153,7 +153,7 @@ class RmState:
     reward_terminal: Tensor = field(init=False)
     last_hit_damage: Tensor = field(init=False)
     last_damage: Tensor = field(init=False)
-    shots: Tensor = field(init=False)          # cumulative fired shots per agent
+    last_p_final: Tensor = field(init=False)    # env p_final of the last fired shot (0 if none)
 
     # static maps
     team: Tensor = field(init=False)
@@ -214,7 +214,7 @@ class RmState:
         self.reward_terminal = f(B, N)
         self.last_hit_damage = f(B, N)
         self.last_damage = f(B, N, N)
-        self.shots = f(B, N)
+        self.last_p_final = f(B, N)
 
         self.team = torch.tensor(
             [cfg.team(i) for i in range(N)], device=d, dtype=torch.long
@@ -283,7 +283,7 @@ def _fixed_reset_rows(s: RmState, rows: List[int]) -> None:
         s.time[b] = cfg.episode_time
         s.total_damage[b].zero_()
         s.cum_damage[b].zero_()
-        s.shots[b].zero_()
+        s.last_p_final[b].zero_()
         s.occ[b].zero_()
         s.outcome[b] = OUTCOME_ONGOING
         s.winner[b] = -1
@@ -432,7 +432,7 @@ def _random_reset_rows(s: RmState, rows: List[int], mode: str, seed: int = 0) ->
     s.time[idx] = t
     s.total_damage[idx] = 0.0
     s.cum_damage[idx] = 0.0
-    s.shots[idx] = 0.0
+    s.last_p_final[idx] = 0.0
     s.occ[idx] = 0.0
     s.outcome[idx] = OUTCOME_ONGOING
     s.winner[idx] = -1
@@ -793,6 +793,7 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     s.hit_cue_valid.zero_()
     s.last_hit_damage.zero_()
     s.last_damage.zero_()
+    s.last_p_final.zero_()
     s.foul_loser.fill_(-1)
     s.double_foul.zero_()
     s.both_200.zero_()
@@ -932,6 +933,7 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
                 dmg = torch.where(fire, cfg.damage_per_frame * p_final, torch.zeros_like(p_final))
                 damage[:, i, j] = damage[:, i, j] + dmg
                 s.last_fired[:, i] = s.last_fired[:, i] | fire
+                s.last_p_final[:, i] = torch.where(fire, p_final, s.last_p_final[:, i])
 
     # spawn damage: enemy spawn, alive, not invuln; no killer, no cue
     spawn_in = torch.zeros((B, N), device=dev, dtype=torch.bool)
@@ -941,8 +943,6 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     s.hp = torch.where(spawn_dmg, torch.clamp(s.hp - cfg.spawn_damage_per_frame, min=0.0), s.hp)
     s.last_hit_damage = damage.sum(dim=2)
     s.last_damage = damage.clone()
-    # count fired shots before the death branch clears last_fired
-    s.shots = s.shots + s.last_fired.float()
 
     # hit direction cue: strongest attacker of this frame, +/-45 deg, 1 frame
     total_dmg = damage.sum(dim=1)
@@ -1351,11 +1351,9 @@ def _build_global_state(s: RmState) -> Tensor:
         for k in range(3):
             j = int(s.enemy_idx[i, k])
             parts.append(s.cum_damage[:, i, j] / cfg.hp_max)
-        # actual hit rate: realized expected damage / (shots * max damage)
-        hit_rate = s.cum_damage[:, i, :].sum(dim=-1) / (
-            s.shots[:, i] * cfg.damage_per_frame
-        ).clamp_min(1e-6)
-        parts.append(hit_rate)
+        # actual hit rate directly from the environment: p_final of the last
+        # fired shot (p_t already lives in the per-agent block above)
+        parts.append(s.last_p_final[:, i])
     total_hp = torch.stack(
         (torch.where(s.alive & (s.team == 0).unsqueeze(0), s.hp, torch.zeros_like(s.hp)).sum(dim=1),
          torch.where(s.alive & (s.team == 1).unsqueeze(0), s.hp, torch.zeros_like(s.hp)).sum(dim=1)),
