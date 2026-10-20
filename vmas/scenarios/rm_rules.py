@@ -58,8 +58,8 @@ OUTCOME_NAMES = {
 
 # observation layout
 SELF_DIM = 24
-MATE_DIM = 15
-ENEMY_DIM = 14
+MATE_DIM = 18          # rel/abs pos + respawn_timer (dead teammate corpse info)
+ENEMY_DIM = 17         # rel/abs pos + respawn_timer (visible dead enemy corpse info)
 CUE_DIM = 3
 LIDAR_DIM = 128
 HUD_DIM = 10
@@ -1235,30 +1235,33 @@ def build_observation(s: RmState, generator: Optional[torch.Generator] = None) -
         o += [(torch.linalg.vector_norm(s.pos[:, i], dim=-1) <= cfg.center_radius).float()]
         o += [point_in_polygon_closed(s.pos[:, i], s.enemy_spawns[i]).float()]
         o += [torch.linalg.vector_norm(s.pos[:, i], dim=-1) / cfg.lock_range]
-        # teammates (2 * 15)
+        # teammates (2 * 18)
         for j in s.mate_idx[i].tolist():
             alive_j = s.alive[:, j]
             rel = sign[:, i, 0].unsqueeze(-1) * (s.pos[:, j] - s.pos[:, i])
+            abs_pos = sign[:, i, 0].unsqueeze(-1) * s.pos[:, j]
             rvel = sign[:, i, 0].unsqueeze(-1) * (s.vel[:, j] - s.vel[:, i])
             dyaw = G.wrap_angle(s.yaw[:, j] - s.yaw[:, i])
-            o += [torch.where(alive_j, rel[:, 0], torch.zeros_like(rel[:, 0])) / cfg.lock_range,
-                  torch.where(alive_j, rel[:, 1], torch.zeros_like(rel[:, 1])) / cfg.lock_range]
+            o += [rel[:, 0] / cfg.lock_range, rel[:, 1] / cfg.lock_range]
+            o += [abs_pos[:, 0] / cfg.field_hx, abs_pos[:, 1] / cfg.field_hy]
             o += [torch.where(alive_j, rvel[:, 0], torch.zeros_like(rvel[:, 0])) / (2 * cfg.v_max),
                   torch.where(alive_j, rvel[:, 1], torch.zeros_like(rvel[:, 1])) / (2 * cfg.v_max)]
             o += [torch.where(alive_j, s.hp[:, j], torch.zeros_like(s.hp[:, j])) / cfg.hp_max,
                   alive_j.float(),
                   torch.where(alive_j, s.invuln[:, j].float(), torch.zeros_like(s.hp[:, j]))]
-            o += [torch.where(alive_j, torch.sin(dyaw), torch.zeros_like(dyaw)),
-                  torch.where(alive_j, torch.cos(dyaw), torch.zeros_like(dyaw))]
+            o += [torch.sin(dyaw), torch.cos(dyaw)]
             o += [torch.where(alive_j, s.heat[:, j], torch.zeros_like(s.heat[:, j])) / cfg.heat_max,
                   torch.where(alive_j, s.spin[:, j], torch.zeros_like(s.spin[:, j]))]
             for k in range(4):
                 o += [(alive_j & (s.target[:, j] == k)).float()]
-        # enemies (3 * 14)
+            o += [s.respawn_timer[:, j] / cfg.respawn_time]
+        # enemies (3 * 17)
         for k in range(3):
             j = int(s.enemy_idx[i, k])
-            vis = visible_geom[:, i, k] & s.alive[:, j]
+            vis = visible_geom[:, i, k]
+            alive_j = s.alive[:, j]
             rel = sign[:, i, 0].unsqueeze(-1) * (s.pos[:, j] - s.pos[:, i])
+            abs_pos = sign[:, i, 0].unsqueeze(-1) * s.pos[:, j]
             rvel = sign[:, i, 0].unsqueeze(-1) * (s.vel[:, j] - s.vel[:, i])
             hp_sigma = cfg.hp_noise_base + cfg.hp_noise_spin * s.spin[:, j]
             noise = torch.randn((B,), device=dev, generator=gen) * hp_sigma
@@ -1272,18 +1275,21 @@ def build_observation(s: RmState, generator: Optional[torch.Generator] = None) -
             o += [vis.float()]
             o += [torch.where(vis, rel[:, 0], torch.zeros_like(rel[:, 0])) / cfg.lock_range,
                   torch.where(vis, rel[:, 1], torch.zeros_like(rel[:, 1])) / cfg.lock_range]
-            o += [torch.where(vis, rvel[:, 0], torch.zeros_like(rvel[:, 0])) / (2 * cfg.v_max),
-                  torch.where(vis, rvel[:, 1], torch.zeros_like(rvel[:, 1])) / (2 * cfg.v_max)]
-            o += [torch.where(vis, hp_obs, torch.zeros_like(hp_obs))]
-            o += [torch.where(vis, s.invuln[:, j].float(), torch.zeros_like(s.hp[:, j]))]
+            o += [torch.where(vis, abs_pos[:, 0], torch.zeros_like(abs_pos[:, 0])) / cfg.field_hx,
+                  torch.where(vis, abs_pos[:, 1], torch.zeros_like(abs_pos[:, 1])) / cfg.field_hy]
+            o += [torch.where(vis & alive_j, rvel[:, 0], torch.zeros_like(rvel[:, 0])) / (2 * cfg.v_max),
+                  torch.where(vis & alive_j, rvel[:, 1], torch.zeros_like(rvel[:, 1])) / (2 * cfg.v_max)]
+            o += [torch.where(vis & alive_j, hp_obs, torch.zeros_like(hp_obs))]
+            o += [torch.where(vis & alive_j, s.invuln[:, j].float(), torch.zeros_like(s.hp[:, j]))]
             o += [torch.where(vis, torch.sin(dyaw_obs), torch.zeros_like(dyaw_obs)),
                   torch.where(vis, torch.cos(dyaw_obs), torch.zeros_like(dyaw_obs))]
-            o += [torch.where(vis, s.spin[:, j], torch.zeros_like(s.spin[:, j]))]
-            o += [torch.where(vis, s.last_fired[:, j].float(), torch.zeros_like(s.spin[:, j]))]
+            o += [torch.where(vis & alive_j, s.spin[:, j], torch.zeros_like(s.spin[:, j]))]
+            o += [torch.where(vis & alive_j, s.last_fired[:, j].float(), torch.zeros_like(s.spin[:, j]))]
             o += [torch.where(vis, p_vis[:, i, k], torch.zeros_like(p_vis[:, i, k]))]
-            o += [torch.where(vis, s.alive[:, j].float(), torch.zeros_like(s.hp[:, j]))]
-            o += [((s.target[:, i] == k + 1) & vis).float()]
-            mask[:, i, k + 1] = vis & (~s.invuln[:, j])
+            o += [torch.where(vis, alive_j.float(), torch.zeros_like(s.hp[:, j]))]
+            o += [((s.target[:, i] == k + 1) & vis & alive_j).float()]
+            o += [torch.where(vis, s.respawn_timer[:, j], torch.zeros_like(s.respawn_timer[:, j])) / cfg.respawn_time]
+            mask[:, i, k + 1] = vis & alive_j & (~s.invuln[:, j])
         # hit cue (3)
         cue_off = 0.0 if int(s.team[i]) == 0 else PI
         cue = G.wrap_angle(s.hit_cue[:, i] + cue_off)
