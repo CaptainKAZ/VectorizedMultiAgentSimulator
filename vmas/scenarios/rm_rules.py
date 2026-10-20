@@ -1187,7 +1187,22 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
     center_r = cfg.k_center_reward * torch.exp(
         -(center ** 2) / (2.0 * cfg.center_sigma ** 2)
     ) * (center > cfg.center_radius).float() * s.alive.float()
-    dense = dense + center_r
+
+    # v1.9 shaping: stay alive; when low HP, return to own spawn (heal zone)
+    alive_f = s.alive.float()
+    survival = cfg.k_survival_reward * alive_f
+    own_centers = torch.stack([p.mean(dim=0) for p in s.own_spawns], dim=0)  # (N,2)
+    d_home = torch.linalg.vector_norm(
+        s.pos - own_centers.unsqueeze(0), dim=-1
+    )  # (B,N)
+    low = (s.hp < cfg.low_hp_threshold * cfg.hp_max).float()
+    home = (
+        cfg.k_low_hp_home_reward
+        * torch.exp(-(d_home ** 2) / (2.0 * cfg.home_sigma ** 2))
+        * low
+        * alive_f
+    )
+    dense = dense + center_r + survival + home
 
     terminal = torch.zeros((B, N), device=dev)
     done = s.done

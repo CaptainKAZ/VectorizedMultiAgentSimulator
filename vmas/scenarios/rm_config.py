@@ -147,6 +147,11 @@ class RmConfig:
     k_hit_reward: float = 0.02            # full 325 damage -> 0.02
     k_center_reward: float = 0.0005        # approach-center shaping, per frame
     center_sigma: float = 1.5
+    # survival / low-HP return-home shaping (v1.9)
+    k_survival_reward: float = 0.0002      # per alive agent per frame
+    k_low_hp_home_reward: float = 0.0005   # per low-HP alive agent per frame, Gaussian near own spawn
+    low_hp_threshold: float = 0.5          # fraction of hp_max
+    home_sigma: float = 2.0                # Gaussian sigma around own spawn center, metres
 
     # ------------------------------------------------------------------
     # 训练课程（不是比赛规则）
