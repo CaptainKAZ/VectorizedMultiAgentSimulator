@@ -534,7 +534,10 @@ def decode_agent_action(
     vmax = cfg.v_max * (1.0 - cfg.spin_speed_coef * s.spin[:, i])
     amax = cfg.a_max * (1.0 - cfg.spin_speed_coef * s.spin[:, i])
 
-    v_des = clip_norm(raw_u[:, :2], 1.0) * vmax.unsqueeze(-1)
+    # v1.14: observations are 180-degree canonicalised for blue, so the
+    # 2-D velocity intent is canonical too.  Rotate it back to world for blue.
+    team_sign = 1.0 if int(s.team[i]) == 0 else -1.0
+    v_des = clip_norm(raw_u[:, :2], 1.0) * (team_sign * vmax).unsqueeze(-1)
     v_next = clip_norm(
         current_vel + clip_norm(v_des - current_vel, (amax * cfg.dt).unsqueeze(-1)),
         vmax.unsqueeze(-1),
