@@ -127,6 +127,7 @@ class RmState:
     respawn_timer: Tensor = field(init=False)
     target: Tensor = field(init=False)
     target_cmd: Tensor = field(init=False)
+    fire_cmd: Tensor = field(init=False)
     p_t: Tensor = field(init=False)
     tau_eff: Tensor = field(init=False)
     last_fired: Tensor = field(init=False)
@@ -192,6 +193,7 @@ class RmState:
         self.respawn_timer = f(B, N)
         self.target = l(B, N)
         self.target_cmd = l(B, N)
+        self.fire_cmd = b(B, N)
         self.p_t = f(B, N)
         self.tau_eff = f(B, N)
         self.last_fired = b(B, N)
@@ -277,6 +279,7 @@ def _fixed_reset_rows(s: RmState, rows: List[int]) -> None:
         s.respawn_timer[b].zero_()
         s.target[b].zero_()
         s.target_cmd[b].zero_()
+        s.fire_cmd[b].zero_()
         s.p_t[b].zero_()
         s.tau_eff[b].fill_(cfg.tau_base)
         s.last_fired[b].zero_()
@@ -427,6 +430,7 @@ def _random_reset_rows(s: RmState, rows: List[int], mode: str, seed: int = 0) ->
     s.respawn_timer[idx] = 0.0
     s.target[idx] = 0
     s.target_cmd[idx] = 0
+    s.fire_cmd[idx] = False
     s.p_t[idx] = 0.0
     s.tau_eff[idx] = cfg.tau_base
     s.last_fired[idx] = False
@@ -514,6 +518,7 @@ def decode_agent_action(
     spin_target = torch.clamp(raw_u[:, 3], 0.0, 1.0)
     s.spin_cmd[:, i] = spin_target
     s.target_cmd[:, i] = torch.round(torch.clamp(raw_u[:, 4], 0.0, 3.0)).long()
+    s.fire_cmd[:, i] = raw_u[:, 5] > 0.5
     s.yaw_cmd[:, i] = torch.clamp(raw_u[:, 2], -1.0, 1.0)
 
     alive = s.alive[:, i]
@@ -965,6 +970,7 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
                 & (pv > 0.0)
                 & (d < cfg.lock_range)
                 & (angle_err.abs() < cfg.fire_angle)
+                & s.fire_cmd[:, i]
             )
             if fire.any():
                 s.heat[:, i] = torch.where(fire, torch.clamp(s.heat[:, i] + cfg.heat_per_frame, max=cfg.heat_max), s.heat[:, i])
@@ -1196,7 +1202,9 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
 
     # v1.9 shaping: stay alive; when low HP, return to own spawn (heal zone)
     alive_f = s.alive.float()
-    survival = cfg.k_survival_reward * alive_f
+    # survival reward scales with HP, so low-HP agents have a clear incentive
+    # to heal / go home rather than trade at 65 HP.
+    survival = cfg.k_survival_reward * (s.hp / cfg.hp_max) * alive_f
     own_centers = torch.stack([p.mean(dim=0) for p in s.own_spawns], dim=0)  # (N,2)
     d_home = torch.linalg.vector_norm(
         s.pos - own_centers.unsqueeze(0), dim=-1

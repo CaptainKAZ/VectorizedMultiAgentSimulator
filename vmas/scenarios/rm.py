@@ -61,8 +61,8 @@ class Scenario(BaseScenario):
                 rotatable=False,
                 shape=Sphere(radius=cfg.robot_radius),
                 dynamics=Holonomic(),
-                u_range=[1.0, 1.0, 1.0, 1.0, 3.0],
-                action_size=5,
+                u_range=[1.0, 1.0, 1.0, 1.0, 3.0, 1.0],
+                action_size=6,
                 mass=cfg.mass,
                 drag=0.0,
                 linear_friction=0.0,
@@ -128,13 +128,13 @@ class Scenario(BaseScenario):
     def process_action(self, agent: Agent):
         i = self.name_to_index[agent.name]
         raw_u = agent.action.u
-        if raw_u.shape[-1] < 5:
+        if raw_u.shape[-1] < 6:
             # controller from the previous frame may have replaced action.u; pad
-            pad = torch.zeros((raw_u.shape[0], 5 - raw_u.shape[-1]), device=raw_u.device)
+            pad = torch.zeros((raw_u.shape[0], 6 - raw_u.shape[-1]), device=raw_u.device)
             raw_u = torch.cat([raw_u, pad], dim=-1)
         v_target = R.decode_agent_action(self.s, i, raw_u, agent.state.vel)
         agent.action.u = torch.cat(
-            [v_target, torch.zeros((v_target.shape[0], 3), device=v_target.device)], dim=-1
+            [v_target, torch.zeros((v_target.shape[0], 4), device=v_target.device)], dim=-1
         )
         agent.controller.process_force()
 
