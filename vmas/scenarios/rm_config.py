@@ -75,6 +75,7 @@ class RmConfig:
     heat_max: float = 160.0
     heat_per_frame: float = 15.0
     cool_per_frame: float = 2.0
+    home_cool_mult: float = 2.0          # own-spawn (heal zone) heat cooling multiplier
     damage_per_frame: float = 30.0              # 30 * p_final
     fire_angle: float = math.radians(1.0)
 
@@ -144,12 +145,13 @@ class RmConfig:
     terminal_draw: float = 0.0
     terminal_both_200: float = 2.0
     terminal_both_foul: float = -10.0
-    k_hit_reward: float = 0.02            # full 325 damage -> 0.02
+    k_hit_reward: float = 0.05            # full 325 damage -> 0.05
     k_center_reward: float = 0.0015        # approach-center shaping, per frame
+    k_center_progress: float = 0.005       # potential shaping per metre moved toward centre
     center_sigma: float = 1.5
     # survival / low-HP return-home shaping (v1.9)
     k_survival_reward: float = 0.0002      # per alive agent per frame
-    k_death_penalty: float = 0.5           # instant dense penalty on the death frame
+    k_death_penalty: float = 0.2           # instant dense penalty on the death frame
     k_collision_penalty: float = 0.001     # per contact per frame (robot/corpse/wall/cover)
     k_low_hp_home_reward: float = 0.0005   # per low-HP alive agent per frame, Gaussian near own spawn
     low_hp_threshold: float = 0.5          # fraction of hp_max

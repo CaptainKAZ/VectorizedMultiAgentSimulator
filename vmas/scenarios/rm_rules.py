@@ -111,6 +111,7 @@ class RmState:
     B: int
 
     pos: Tensor = field(init=False)
+    center_dist_prev: Tensor = field(init=False)
     vel: Tensor = field(init=False)
     v_pre: Tensor = field(init=False)
     yaw: Tensor = field(init=False)
@@ -177,6 +178,7 @@ class RmState:
         b = lambda *shape: torch.zeros(shape, device=d, dtype=torch.bool)
         l = lambda *shape: torch.zeros(shape, device=d, dtype=torch.long)
         self.pos = f(B, N, 2)
+        self.center_dist_prev = f(B, N)
         self.vel = f(B, N, 2)
         self.v_pre = f(B, N, 2)
         self.yaw = f(B, N)
@@ -497,6 +499,7 @@ def reset_state(
             )
     else:
         _random_reset_rows(s, rows, mode, seed=seed + (rows[0] if rows else 0))
+    s.center_dist_prev = torch.linalg.vector_norm(s.pos, dim=-1)
     build_observation(s)
 
 
@@ -919,8 +922,16 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     s.p_t = torch.where(lock_alive, s.p_t, torch.zeros_like(s.p_t))
 
     # ---- 5.8 heat / fire / damage -----------------------------------
-    # cool all alive, then unlock overheat
-    s.heat = torch.where(s.alive, torch.clamp(s.heat - cfg.cool_per_frame, min=0.0), s.heat)
+    # cool all alive; own spawn (heal zone) cools at home_cool_mult times rate
+    home_cool = torch.zeros((B, N), device=dev, dtype=torch.bool)
+    for i in range(N):
+        home_cool[:, i] = point_in_polygon_closed(s.pos[:, i], s.own_spawns[i])
+    cool = torch.where(
+        s.alive & home_cool,
+        torch.full_like(s.heat, cfg.cool_per_frame * cfg.home_cool_mult),
+        torch.full_like(s.heat, cfg.cool_per_frame),
+    )
+    s.heat = torch.where(s.alive, torch.clamp(s.heat - cool, min=0.0), s.heat)
     s.overheated = s.overheated & ~(s.alive & (s.heat <= 0.0))
 
     damage = torch.zeros((B, N, N), device=dev)
@@ -1213,6 +1224,11 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
     center_r = cfg.k_center_reward * torch.exp(
         -(center ** 2) / (2.0 * cfg.center_sigma ** 2)
     ) * (center > cfg.center_radius).float() * s.alive.float()
+    # v1.15 potential shaping: reward reduction of distance to centre, so the
+    # gradient exists from the spawn distance (the Gaussian above is tiny there).
+    center_progress = (
+        cfg.k_center_progress * (s.center_dist_prev - center) * s.alive.float()
+    )
 
     # v1.9 shaping: stay alive; when low HP, return to own spawn (heal zone)
     alive_f = s.alive.float()
@@ -1252,7 +1268,14 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
             cover_hits = torch.maximum(cover_hits, near.float())
         contact[:, i] = robot_hits + wall + cover_hits
 
-    dense = dense + center_r + survival + home - cfg.k_collision_penalty * contact
+    dense = (
+        dense
+        + center_r
+        + center_progress
+        + survival
+        + home
+        - cfg.k_collision_penalty * contact
+    )
 
     terminal = torch.zeros((B, N), device=dev)
     done = s.done
@@ -1289,6 +1312,7 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
         torch.zeros_like(reward_dense),
         reward_dense,
     )
+    s.center_dist_prev = center.detach()
     s.reward_dense = reward_dense
     s.reward_terminal = terminal
     s.reward = s.reward_dense + s.reward_terminal
