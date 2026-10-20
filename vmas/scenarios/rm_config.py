@@ -21,7 +21,7 @@ class RmConfig:
     # 时间 / 场地
     # ------------------------------------------------------------------
     dt: float = 0.1
-    episode_time: float = 300.0          # 3000 frames
+    episode_time: float = 180.0          # 1800 frames
     field_hx: float = 6.0                # wall at x = ±6.0
     field_hy: float = 4.0                # wall at y = ±4.0
     bound_x: float = 5.7                 # robot center legal range
@@ -102,7 +102,7 @@ class RmConfig:
     center_radius: float = 1.5
     score_per_frame: float = 0.1
     kill_score: float = 20.0
-    target_score: float = 200.0
+    target_score: float = 90.0
 
     # ------------------------------------------------------------------
     # 固定出生位
@@ -155,7 +155,7 @@ class RmConfig:
     rsi_symmetric_prob: float = 0.5       # mixed: 50% symmetric, 50% asymmetric
     rsi_min_sep: float = 1.0              # min center distance between robots
     rsi_time_min: float = 30.0
-    rsi_time_max: float = 300.0
+    rsi_time_max: float = 180.0
     rsi_hp_min: float = 65.0
     rsi_hp_max: float = 325.0
     rsi_spin_max: float = 0.5
