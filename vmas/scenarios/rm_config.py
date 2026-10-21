@@ -139,12 +139,12 @@ class RmConfig:
     # 奖励（训练用；裁判规则只看第 13 节）
     # ------------------------------------------------------------------
     k_score_reward: float = 0.01          # 1 score point -> 0.01 reward
-    terminal_win: float = 2.0
-    terminal_loss: float = -2.0
-    terminal_foul: float = -10.0
+    terminal_win: float = 2.0            # winner of a collision-foul decision
+    terminal_foul: float = -10.0         # fouling team
     terminal_draw: float = 0.0
     terminal_both_200: float = 2.0
     terminal_both_foul: float = -10.0
+    k_terminal_margin: float = 4.0       # normal win/loss: 4 * (own score - enemy) / target
     k_hit_reward: float = 0.05            # full 325 damage -> 0.05
     k_center_reward: float = 0.0015        # approach-center shaping, per frame
     k_center_progress: float = 0.005       # potential shaping per metre moved toward centre
@@ -152,7 +152,10 @@ class RmConfig:
     # survival / low-HP return-home shaping (v1.9)
     k_survival_reward: float = 0.0002      # per alive agent per frame
     k_death_penalty: float = 0.2           # instant dense penalty on the death frame
-    k_collision_penalty: float = 0.001     # per contact per frame (robot/corpse/wall/cover)
+    k_wall_collision_penalty: float = 0.004   # wall or cover contact per frame
+    k_body_collision_penalty: float = 0.002   # robot or corpse contact per frame
+    k_occupy_reward: float = 0.001            # constant per-frame reward inside centre
+    k_kill_reward_pool: float = 0.6           # per kill, split by cumulative damage credit
     k_low_hp_home_reward: float = 0.0005   # per low-HP alive agent per frame, Gaussian near own spawn
     low_hp_threshold: float = 0.5          # fraction of hp_max
     home_sigma: float = 2.0                # Gaussian sigma around own spawn center, metres

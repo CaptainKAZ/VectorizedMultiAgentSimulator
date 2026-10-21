@@ -58,12 +58,13 @@ OUTCOME_NAMES = {
 
 # observation layout
 SELF_DIM = 24
+SPAWN_DIM = 3          # own spawn centre relative to the agent
 MATE_DIM = 18          # rel/abs pos + respawn_timer (dead teammate corpse info)
 ENEMY_DIM = 17         # rel/abs pos + respawn_timer (visible dead enemy corpse info)
 CUE_DIM = 3
 LIDAR_DIM = 128
 HUD_DIM = 10
-OBS_DIM = SELF_DIM + 2 * MATE_DIM + 3 * ENEMY_DIM + CUE_DIM + LIDAR_DIM + HUD_DIM
+OBS_DIM = SELF_DIM + SPAWN_DIM + 2 * MATE_DIM + 3 * ENEMY_DIM + CUE_DIM + LIDAR_DIM + HUD_DIM
 
 # global state layout (critic)
 G_AGENT_DIM = 22
@@ -205,6 +206,9 @@ class RmState:
         self.time = f(B)
         self.total_damage = f(B, 2)
         self.cum_damage = f(B, N, N)
+        self.kill_damage = f(B, N, N)
+        self.last_kill_credit = f(B, N)
+        self.last_kill_score = f(B, 2)
         self.occ = f(B, 2)
         self.outcome = l(B)
         self.winner = torch.full((B,), -1, device=d, dtype=torch.long)
@@ -291,6 +295,9 @@ def _fixed_reset_rows(s: RmState, rows: List[int]) -> None:
         s.time[b] = cfg.episode_time
         s.total_damage[b].zero_()
         s.cum_damage[b].zero_()
+        s.kill_damage[b].zero_()
+        s.last_kill_credit[b].zero_()
+        s.last_kill_score[b].zero_()
         s.last_p_final[b].zero_()
         s.occ[b].zero_()
         s.outcome[b] = OUTCOME_ONGOING
@@ -500,6 +507,9 @@ def reset_state(
     else:
         _random_reset_rows(s, rows, mode, seed=seed + (rows[0] if rows else 0))
     s.center_dist_prev = torch.linalg.vector_norm(s.pos, dim=-1)
+    s.kill_damage[rows] = 0.0
+    s.last_kill_credit[rows] = 0.0
+    s.last_kill_score[rows] = 0.0
     build_observation(s)
 
 
@@ -844,6 +854,8 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     s.last_damage.zero_()
     s.last_p_final.zero_()
     s.just_died.zero_()
+    s.last_kill_credit.zero_()
+    s.last_kill_score.zero_()
     s.foul_loser.fill_(-1)
     s.double_foul.zero_()
     s.both_200.zero_()
@@ -1057,6 +1069,29 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
         for t in (0, 1):
             s.total_damage[:, t] = s.total_damage[:, t] + credit[:, (s.team == t)].sum(dim=1)
     s.cum_damage = s.cum_damage + damage
+    s.kill_damage = s.kill_damage + damage
+    s.last_kill_score = kill_add
+
+    # individual kill credit: split a fixed pool by cumulative damage to the
+    # victim; reset the victim's damage column for its next life.
+    for j in range(N):
+        died_j = died[:, j] & (total_dmg[:, j] > 0)
+        if not bool(died_j.any()):
+            s.kill_damage[:, :, j] = torch.where(
+                died[:, j].unsqueeze(1),
+                torch.zeros_like(s.kill_damage[:, :, j]),
+                s.kill_damage[:, :, j],
+            )
+            continue
+        col = s.kill_damage[:, :, j]
+        share = col / col.sum(dim=1, keepdim=True).clamp_min(EPS)
+        pool = share * cfg.k_kill_reward_pool
+        s.last_kill_credit = s.last_kill_credit + pool * died_j.unsqueeze(1)
+        s.kill_damage[:, :, j] = torch.where(
+            died_j.unsqueeze(1),
+            torch.zeros_like(col),
+            col,
+        )
     s.score = s.score + kill_add
 
     # death state
@@ -1147,8 +1182,18 @@ def step_post(s: RmState, generator: Optional[torch.Generator] = None) -> None:
     occ_blue = (s.alive & (~s.invuln) & in_center & (s.team == 1).unsqueeze(0)).sum(dim=1).float()
     s.occ = torch.stack((occ_red, occ_blue), dim=1)
     score_add = torch.zeros((B, 2), device=dev)
-    score_add[:, 0] = torch.where(occ_red > occ_blue, torch.full_like(occ_red, cfg.score_per_frame), torch.zeros_like(occ_red))
-    score_add[:, 1] = torch.where(occ_blue > occ_red, torch.full_like(occ_blue, cfg.score_per_frame), torch.zeros_like(occ_blue))
+    # v1.16: the team with more robots inside scores faster, proportional to
+    # its occupancy count (1 -> 0.1/frame, 2 -> 0.2, 3 -> 0.3).
+    score_add[:, 0] = torch.where(
+        occ_red > occ_blue,
+        cfg.score_per_frame * occ_red,
+        torch.zeros_like(occ_red),
+    )
+    score_add[:, 1] = torch.where(
+        occ_blue > occ_red,
+        cfg.score_per_frame * occ_blue,
+        torch.zeros_like(occ_blue),
+    )
     s.score = s.score + score_add
 
     reached = s.score >= cfg.target_score - 1e-6
@@ -1215,10 +1260,13 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
     dev = s.device
     team = s.team.unsqueeze(0).expand(B, N)
 
-    score_delta = s.score - score_before
+    # Kill score is paid individually below; the team score reward only covers
+    # the remaining score change (occupation / any other team score).
+    score_delta = s.score - score_before - s.last_kill_score
     dense = cfg.k_score_reward * score_delta.gather(1, team)
     # small per-attacker hit shaping (actual/raw damage dealt to enemies)
     hit = cfg.k_hit_reward * (s.last_hit_damage / cfg.hp_max)
+    kill_credit = s.last_kill_credit
 
     center = torch.linalg.vector_norm(s.pos, dim=-1)
     center_r = cfg.k_center_reward * torch.exp(
@@ -1229,6 +1277,8 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
     center_progress = (
         cfg.k_center_progress * (s.center_dist_prev - center) * s.alive.float()
     )
+    in_point = (center <= cfg.center_radius) & s.alive & (~s.invuln)
+    occupy = cfg.k_occupy_reward * in_point.float()
 
     # v1.9 shaping: stay alive; when low HP, return to own spawn (heal zone)
     alive_f = s.alive.float()
@@ -1249,7 +1299,7 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
     # v1.12 collision/contact penalty: robot-robot, robot-corpse, wall, cover.
     # The resolver pushes bodies apart; use a small tolerance so the contact
     # frame is still penalized.
-    contact = torch.zeros((B, N), device=dev, dtype=torch.float32)
+    contact_penalty = torch.zeros((B, N), device=dev, dtype=torch.float32)
     for i in range(N):
         d_other = torch.linalg.vector_norm(
             s.pos[:, i].unsqueeze(1) - s.pos, dim=-1
@@ -1266,34 +1316,56 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
             _, dist, _, inside = G.nearest_point_on_polygon(s.pos[:, i], poly)
             near = (dist <= cfg.robot_radius + 1e-3) | inside
             cover_hits = torch.maximum(cover_hits, near.float())
-        contact[:, i] = robot_hits + wall + cover_hits
+        contact_penalty[:, i] = (
+            cfg.k_body_collision_penalty * robot_hits
+            + cfg.k_wall_collision_penalty * (wall + cover_hits)
+        )
 
     dense = (
         dense
         + center_r
         + center_progress
+        + occupy
         + survival
         + home
-        - cfg.k_collision_penalty * contact
+        + kill_credit
+        - contact_penalty
     )
 
     terminal = torch.zeros((B, N), device=dev)
     done = s.done
     win_team = s.winner  # 0 draw, 1 red, 2 blue
-    # normal win/loss
+
+    # v1.16 continuous terminal: normal win/loss is proportional to the final
+    # score margin, so a 90:0 win pays more than a 90:89 win.
+    margin = s.score[:, 0] - s.score[:, 1]
+    team_margin = torch.where(
+        team == 0, margin.unsqueeze(1), -margin.unsqueeze(1)
+    )
+    margin_norm = team_margin / cfg.target_score
+    normal = done & (win_team != 0) & (s.foul_loser < 0)
+    terminal = torch.where(
+        normal.unsqueeze(1),
+        cfg.k_terminal_margin * margin_norm,
+        terminal,
+    )
+
+    # Collision foul stays a safety penalty: fouling team -10, opponent +2.
     for t in (0, 1):
-        is_team = (team == t)
-        if t == 0:
-            win = done & (win_team == 1)
-            lose = done & (win_team == 2)
-        else:
-            win = done & (win_team == 2)
-            lose = done & (win_team == 1)
-        terminal = torch.where(is_team & win.unsqueeze(1), torch.full_like(terminal, cfg.terminal_win), terminal)
-        terminal = torch.where(is_team & lose.unsqueeze(1), torch.full_like(terminal, cfg.terminal_loss), terminal)
-        # collision foul: loser gets -10; winner keeps +2
-        foul_lose = lose & (s.foul_loser == t)
-        terminal = torch.where(is_team & foul_lose.unsqueeze(1), torch.full_like(terminal, cfg.terminal_foul), terminal)
+        is_team = team == t
+        foul_lose = done & (s.foul_loser == t)
+        foul_win = done & (win_team == t + 1) & (s.foul_loser == 1 - t)
+        terminal = torch.where(
+            is_team & foul_lose.unsqueeze(1),
+            torch.full_like(terminal, cfg.terminal_foul),
+            terminal,
+        )
+        terminal = torch.where(
+            is_team & foul_win.unsqueeze(1),
+            torch.full_like(terminal, cfg.terminal_win),
+            terminal,
+        )
+
     terminal = torch.where(done.unsqueeze(1) & (win_team == 0).unsqueeze(1), torch.full_like(terminal, cfg.terminal_draw), terminal)
     terminal = torch.where(done.unsqueeze(1) & s.both_200.unsqueeze(1), torch.full_like(terminal, cfg.terminal_both_200), terminal)
     terminal = torch.where(done.unsqueeze(1) & s.double_foul.unsqueeze(1), torch.full_like(terminal, cfg.terminal_both_foul), terminal)
@@ -1347,6 +1419,7 @@ def build_observation(s: RmState, generator: Optional[torch.Generator] = None) -
     obs = torch.zeros((B, N, OBS_DIM), device=dev)
     mask = torch.zeros((B, N, 4), device=dev, dtype=torch.bool)
     mask[:, :, 0] = True
+    own_centers = torch.stack([p.mean(dim=0) for p in s.own_spawns], dim=0)  # (N,2)
 
     for i in range(N):
         o = []
@@ -1372,6 +1445,13 @@ def build_observation(s: RmState, generator: Optional[torch.Generator] = None) -
         o += [(torch.linalg.vector_norm(s.pos[:, i], dim=-1) <= cfg.center_radius).float()]
         o += [point_in_polygon_closed(s.pos[:, i], s.enemy_spawns[i]).float()]
         o += [torch.linalg.vector_norm(s.pos[:, i], dim=-1) / cfg.lock_range]
+        # own spawn centre relative to the agent (3); canonical for blue
+        rel_spawn = sign[:, i, 0].unsqueeze(-1) * (
+            own_centers[i].view(1, 2) - s.pos[:, i]
+        )
+        o += [rel_spawn[:, 0] / cfg.field_hx,
+              rel_spawn[:, 1] / cfg.field_hy,
+              torch.linalg.vector_norm(rel_spawn, dim=-1) / cfg.lock_range]
         # teammates (2 * 18)
         for j in s.mate_idx[i].tolist():
             alive_j = s.alive[:, j]
