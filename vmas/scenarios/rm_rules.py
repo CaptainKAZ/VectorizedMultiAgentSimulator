@@ -58,7 +58,7 @@ OUTCOME_NAMES = {
 
 # observation layout
 SELF_DIM = 24
-SPAWN_DIM = 3          # own spawn centre relative to the agent
+SPAWN_DIM = 4          # own spawn centre relative + distance + is_in_spawn
 MATE_DIM = 18          # rel/abs pos + respawn_timer (dead teammate corpse info)
 ENEMY_DIM = 17         # rel/abs pos + respawn_timer (visible dead enemy corpse info)
 CUE_DIM = 3
@@ -1344,9 +1344,17 @@ def _finalize_rewards(s: RmState, score_before: Tensor) -> None:
     )
     margin_norm = team_margin / cfg.target_score
     normal = done & (win_team != 0) & (s.foul_loser < 0)
+    # Victory base + continuous margin: every normal win gets +2/-2 first,
+    # then the score margin adds 4 * margin / target_score.
+    win_side = team == (win_team.unsqueeze(1) - 1)
+    base = torch.where(
+        win_side,
+        torch.full_like(terminal, cfg.terminal_win),
+        torch.full_like(terminal, cfg.terminal_loss),
+    )
     terminal = torch.where(
         normal.unsqueeze(1),
-        cfg.k_terminal_margin * margin_norm,
+        base + cfg.k_terminal_margin * margin_norm,
         terminal,
     )
 
@@ -1451,7 +1459,8 @@ def build_observation(s: RmState, generator: Optional[torch.Generator] = None) -
         )
         o += [rel_spawn[:, 0] / cfg.field_hx,
               rel_spawn[:, 1] / cfg.field_hy,
-              torch.linalg.vector_norm(rel_spawn, dim=-1) / cfg.lock_range]
+              torch.linalg.vector_norm(rel_spawn, dim=-1) / cfg.lock_range,
+              point_in_polygon_closed(s.pos[:, i], s.own_spawns[i]).float()]
         # teammates (2 * 18)
         for j in s.mate_idx[i].tolist():
             alive_j = s.alive[:, j]
