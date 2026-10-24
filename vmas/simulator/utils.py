@@ -230,9 +230,13 @@ class TorchUtils:
 
     @staticmethod
     def where_from_index(env_index, new_value, old_value):
-        mask = torch.zeros_like(old_value, dtype=torch.bool, device=old_value.device)
-        mask[env_index] = True
-        return torch.where(mask, new_value, old_value)
+        # Assignment is equivalent to the original boolean-mask where, but
+        # avoids allocating a full old_value-sized mask on every per-env reset.
+        # new_value is either a scalar or has the same trailing shape as
+        # old_value, so slicing assignment broadcasts exactly like where().
+        out = old_value.clone()
+        out[env_index] = new_value
+        return out
 
 
 class ScenarioUtils:

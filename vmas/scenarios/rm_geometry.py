@@ -275,7 +275,9 @@ def ray_wall(origin: Tensor, direction: Tensor, hx: float, hy: float) -> Tensor:
     return torch.stack(ts, dim=-1).min(dim=-1).values
 
 
-def ray_edges(origin: Tensor, direction: Tensor, edges: Tensor) -> Tuple[Tensor, Tensor]:
+def ray_edges(
+    origin: Tensor, direction: Tensor, edges: Tensor, eps: float = EPS
+) -> Tuple[Tensor, Tensor]:
     """Ray vs a batch of segments, fully vectorised.
 
     origin/direction: (..., 2)
@@ -289,17 +291,17 @@ def ray_edges(origin: Tensor, direction: Tensor, edges: Tensor) -> Tuple[Tensor,
     q2 = edges[:, 2:]
     s = q2 - q1                                   # (E,2)
     denom = d[..., 0] * s[:, 1] - d[..., 1] * s[:, 0]
-    valid = torch.abs(denom) > EPS
+    valid = torch.abs(denom) > eps
     q = q1 - o                                    # (...,E,2)
     denom_safe = torch.where(valid, denom, torch.ones_like(denom))
     t = (q[..., 0] * s[:, 1] - q[..., 1] * s[:, 0]) / denom_safe
     u = (q[..., 0] * d[..., 1] - q[..., 1] * d[..., 0]) / denom_safe
-    hit = valid & (t >= 0.0) & (u >= -EPS) & (u <= 1.0 + EPS)
+    hit = valid & (t >= 0.0) & (u >= -eps) & (u <= 1.0 + eps)
     return t, hit
 
 
 def segment_circle_blocked(
-    observer_pos: Tensor, points: Tensor, circles: Tensor
+    observer_pos: Tensor, points: Tensor, circles: Tensor, eps: float = EPS
 ) -> Tensor:
     """Whether segment observer_pos -> each point is blocked by any circle.
 
@@ -310,12 +312,12 @@ def segment_circle_blocked(
     c = circles[:, None, :, :2]                    # (B,1,K,2)
     r = circles[:, None, :, 2]                     # (B,1,K)
     ab = points[:, :, None, :] - observer_pos[:, None, None, :]  # (B,S,1,2)
-    denom = torch.sum(ab * ab, dim=-1).clamp_min(EPS)            # (B,S,1)
+    denom = torch.sum(ab * ab, dim=-1).clamp_min(eps)            # (B,S,1)
     t = torch.sum((c - observer_pos[:, None, None, :]) * ab, dim=-1) / denom
     t = t.clamp(0.0, 1.0)
     q = observer_pos[:, None, None, :] + t.unsqueeze(-1) * ab
     dist = torch.linalg.vector_norm(c - q, dim=-1)               # (B,S,K)
-    return (dist <= r + EPS).any(dim=-1)
+    return (dist <= r + eps).any(dim=-1)
 
 
 
@@ -330,6 +332,7 @@ def visibility_arc(
     occluder_circles: Tensor,      # (B, K, 3)  x, y, r
     occluder_edges: Tensor,        # (E, 4) x1,y1,x2,y2
     n_samples: int,
+    eps: float = EPS,
 ) -> Tensor:
     """Visible fraction of the target's front arc.
 
@@ -359,10 +362,10 @@ def visibility_arc(
     ) * full.unsqueeze(-1) / float(S)                       # (B, S)
     P = target_pos.unsqueeze(1) + target_radius * rotate(u.unsqueeze(1), phi)  # (B, S, 2)
 
-    blocked = segment_circle_blocked(observer_pos, P, occluder_circles)
+    blocked = segment_circle_blocked(observer_pos, P, occluder_circles, eps)
     if occluder_edges.numel() > 0:
         seg = P - observer_pos.unsqueeze(1)                 # (B,S,2)
-        t, hit = ray_edges(observer_pos.unsqueeze(1), seg, occluder_edges)
+        t, hit = ray_edges(observer_pos.unsqueeze(1), seg, occluder_edges, eps)
         blocked = blocked | (hit & (t < 1.0 - 1e-6)).any(dim=-1)
 
     return (~blocked).to(observer_pos.dtype).mean(dim=1)
@@ -423,3 +426,46 @@ def lidar_ranges(
     out = best / max_range
     out = torch.where(torch.isinf(best), torch.ones_like(out), out)
     return out
+
+
+def obstacle_distances(
+    origin: Tensor,
+    edges: Tensor,
+    max_range: float,
+    hx: float,
+    hy: float,
+    n_rays: int = 8,
+) -> Tensor:
+    """World-frame obstacle clearance in `n_rays` directions.
+
+    Returns (B, n_rays) in [0, 1], ordered starting at +x and going CCW:
+    E, NE, N, NW, W, SW, S, SE for n_rays=8.  Only static covers/walls are
+    included; other agents are represented separately by the entity tokens.
+    """
+    B = origin.shape[0]
+    device = origin.device
+    angles = torch.arange(n_rays, device=device, dtype=origin.dtype) * (
+        TWO_PI / float(n_rays)
+    )
+    dirs = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
+    dirs = dirs.unsqueeze(0).expand(B, n_rays, 2)
+    o = origin.unsqueeze(1).expand(B, n_rays, 2)
+    best = torch.full((B, n_rays), float("inf"), device=device)
+    if edges.numel() > 0:
+        t, hit = ray_edges(o, dirs, edges)
+        t = torch.where(hit, t, torch.full_like(t, float("inf")))
+        best = torch.minimum(best, t.min(dim=-1).values)
+    best = torch.minimum(best, ray_wall(o, dirs, hx, hy))
+    best = torch.clamp(best, max=max_range)
+    out = best / max_range
+    return torch.where(torch.isinf(best), torch.ones_like(out), out)
+
+
+
+# Optional TorchScript version of the hottest geometry kernel.  The scripted
+# function is kept separate so the eager path remains the default; it was
+# verified bitwise against visibility_arc on random inputs.
+try:
+    VISIBILITY_ARC_JIT = torch.jit.script(visibility_arc)
+except Exception:
+    VISIBILITY_ARC_JIT = None

@@ -81,6 +81,11 @@ class Scenario(BaseScenario):
         self._add_landmarks(world, cfg)
         self.s = R.make_state(batch_dim, device, cfg)
         self.step_count = 0
+        # reset_at() is called once per resetting env by torchrl.  Building the
+        # full observation every time is O(num_resets * B); defer it until the
+        # next observation/global-state access.
+        self._obs_dirty = False
+        self._obs_dirty_rows = None
         return world
 
     def _add_landmarks(self, world: World, cfg: RmConfig):
@@ -115,7 +120,19 @@ class Scenario(BaseScenario):
         rows = None
         if env_index is not None:
             rows = env_index.reshape(-1).tolist() if torch.is_tensor(env_index) else [env_index]
-        R.reset_state(self.s, rows, mode=self.cfg.init_mode, seed=self.seed)
+        R.reset_state(
+            self.s, rows, mode=self.cfg.init_mode, seed=self.seed,
+            build_obs=False,
+        )
+        if rows is None:
+            self._obs_dirty = True
+            self._obs_dirty_rows = None
+        else:
+            if not self._obs_dirty:
+                self._obs_dirty_rows = set()
+            if self._obs_dirty_rows is not None:
+                self._obs_dirty_rows.update(rows)
+            self._obs_dirty = True
         for i, agent in enumerate(self.world.agents):
             agent.state.pos = self.s.pos[:, i].clone()
             agent.state.vel = self.s.vel[:, i].clone()
@@ -148,7 +165,17 @@ class Scenario(BaseScenario):
             agent.state.vel = self.s.vel[:, i].clone()
         self.step_count += 1
 
+    def _ensure_obs(self):
+        if self._obs_dirty:
+            if self._obs_dirty_rows is None:
+                R.build_observation(self.s)
+            else:
+                R.build_observation_rows(self.s, sorted(self._obs_dirty_rows))
+            self._obs_dirty = False
+            self._obs_dirty_rows = None
+
     def observation(self, agent: Agent):
+        self._ensure_obs()
         i = self.name_to_index[agent.name]
         return self.s.obs[:, i]
 
@@ -176,7 +203,11 @@ class Scenario(BaseScenario):
     def get_action_mask(self) -> torch.Tensor:
         return self.s.action_mask
 
+    def get_fire_mask(self) -> torch.Tensor:
+        return self.s.fire_mask
+
     def get_global_state(self) -> torch.Tensor:
+        self._ensure_obs()
         return self.s.global_state
 
     # ------------------------------------------------------------------
